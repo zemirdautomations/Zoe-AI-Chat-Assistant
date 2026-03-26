@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zoe Dashboard — ZemiRD Automations</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #080c0f;
+  --bg2: #0e1419;
+  --bg3: #141c23;
+  --bg4: #1a232c;
+  --border: #1f2d38;
+  --border2: #263545;
+  --green: #00e676;
+  --green2: #00c853;
+  --green-dim: rgba(0,230,118,0.08);
+  --green-glow: rgba(0,230,118,0.2);
+  --amber: #ffab40;
+  --amber-dim: rgba(255,171,64,0.1);
+  --blue: #40c4ff;
+  --blue-dim: rgba(64,196,255,0.1);
+  --violet: #e040fb;
+  --violet-dim: rgba(224,64,251,0.1);
+  --red: #ff5252;
+  --red-dim: rgba(255,82,82,0.1);
+  --text: #e8f4f8;
+  --text2: #7a9bb5;
+  --text3: #3d5a72;
+  --font: 'Instrument Sans', sans-serif;
+  --display: 'Syne', sans-serif;
+  --sidebar: 240px;
+  --r: 10px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; display: flex; overflow-x: hidden; }
+
+/* AMBIENT GLOW */
+body::before { content: ''; position: fixed; top: -200px; left: -200px; width: 600px; height: 600px; background: radial-gradient(circle, rgba(0,230,118,0.03) 0%, transparent 70%); pointer-events: none; z-index: 0; }
+
+/* LOGIN */
+.login-screen { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; z-index: 1000; flex-direction: column; gap: 32px; }
+.login-screen.hidden { display: none; }
+.login-logo { font-family: var(--display); font-size: 48px; font-weight: 800; letter-spacing: -2px; }
+.login-logo span { color: var(--green); }
+.login-tagline { font-size: 13px; color: var(--text2); letter-spacing: 2px; text-transform: uppercase; margin-top: -20px; }
+.login-box { background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; padding: 32px; width: 360px; display: flex; flex-direction: column; gap: 16px; }
+.login-box h2 { font-family: var(--display); font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+.login-box p { font-size: 12px; color: var(--text2); margin-bottom: 8px; }
+.login-input { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; font-size: 14px; color: var(--text); font-family: var(--font); outline: none; transition: border-color 0.2s; width: 100%; }
+.login-input:focus { border-color: var(--green); }
+.login-btn { background: var(--green); color: #000; font-family: var(--display); font-weight: 700; font-size: 14px; padding: 12px; border-radius: 8px; border: none; cursor: pointer; transition: all 0.2s; letter-spacing: 0.5px; }
+.login-btn:hover { background: var(--green2); transform: translateY(-1px); box-shadow: 0 8px 20px var(--green-glow); }
+.login-footer { font-size: 11px; color: var(--text3); text-align: center; }
+
+/* SIDEBAR */
+.sidebar { width: var(--sidebar); background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: fixed; top: 0; left: 0; bottom: 0; z-index: 100; }
+.logo-area { padding: 24px 20px 20px; border-bottom: 1px solid var(--border); }
+.logo-mark { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.logo-icon { width: 34px; height: 34px; background: var(--green); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+.logo-name { font-family: var(--display); font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+.logo-name span { color: var(--green); }
+.logo-sub { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 1.5px; padding-left: 2px; }
+
+.store-pill { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 16px 16px 0; display: flex; align-items: center; gap: 10px; }
+.store-pill-av { width: 30px; height: 30px; background: var(--green-dim); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px; color: var(--green); border: 1px solid var(--border); flex-shrink: 0; }
+.store-pill-name { font-size: 12px; font-weight: 600; line-height: 1.3; }
+.store-pill-plan { font-size: 10px; color: var(--green); background: var(--green-dim); padding: 1px 6px; border-radius: 99px; display: inline-block; margin-top: 2px; font-weight: 600; }
+.pulse-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 2s infinite; margin-left: auto; flex-shrink: 0; }
+@keyframes pulse { 0%,100%{opacity:1}50%{opacity:0.3} }
+
+nav { padding: 16px 12px; flex: 1; overflow-y: auto; }
+.nav-group { margin-bottom: 24px; }
+.nav-group-label { font-size: 9px; color: var(--text3); text-transform: uppercase; letter-spacing: 2px; padding: 0 10px; margin-bottom: 4px; }
+.nav-btn { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; color: var(--text2); transition: all 0.15s; border: none; background: none; width: 100%; text-align: left; font-family: var(--font); position: relative; }
+.nav-btn:hover { background: var(--bg3); color: var(--text); }
+.nav-btn.active { background: var(--green-dim); color: var(--green); border: 1px solid rgba(0,230,118,0.15); }
+.nav-btn .n-icon { font-size: 15px; width: 22px; text-align: center; }
+.nav-badge { margin-left: auto; background: var(--green); color: #000; font-size: 9px; font-weight: 800; padding: 1px 5px; border-radius: 99px; }
+.nav-badge.amber { background: var(--amber); }
+
+.sidebar-foot { padding: 16px 12px; border-top: 1px solid var(--border); }
+.support-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.support-card-title { font-size: 11px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.support-card-links { display: flex; flex-direction: column; gap: 3px; }
+.support-link { font-size: 10px; color: var(--text2); text-decoration: none; display: flex; align-items: center; gap: 5px; transition: color 0.15s; }
+.support-link:hover { color: var(--green); }
+
+/* MAIN */
+.main { margin-left: var(--sidebar); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.topbar { padding: 14px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 14px; background: var(--bg2); position: sticky; top: 0; z-index: 50; backdrop-filter: blur(10px); }
+.topbar-title { font-family: var(--display); font-size: 16px; font-weight: 700; flex: 1; }
+.live-pill { font-size: 10px; background: var(--green-dim); color: var(--green); padding: 4px 10px; border-radius: 99px; font-weight: 700; display: flex; align-items: center; gap: 5px; border: 1px solid rgba(0,230,118,0.2); letter-spacing: 0.5px; }
+.icon-btn { background: none; border: 1px solid var(--border); color: var(--text2); cursor: pointer; font-size: 14px; padding: 6px 10px; border-radius: 8px; transition: all 0.15s; }
+.icon-btn:hover { background: var(--bg3); color: var(--text); border-color: var(--border2); }
+.content { padding: 28px; flex: 1; }
+
+/* PAGES */
+.page { display: none; animation: fadeIn 0.2s ease; }
+.page.active { display: block; }
+@keyframes fadeIn { from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)} }
+
+/* WELCOME BANNER */
+.welcome-banner { margin-bottom: 24px; }
+.welcome-eyebrow { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 6px; }
+.welcome-heading { font-family: var(--display); font-size: 30px; font-weight: 800; letter-spacing: -1px; line-height: 1; margin-bottom: 6px; }
+.welcome-heading em { color: var(--green); font-style: normal; }
+.welcome-sub { font-size: 13px; color: var(--text2); }
+
+/* STAT CARDS */
+.kpi-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin-bottom: 16px; }
+.kpi { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 18px 20px; transition: border-color 0.2s; position: relative; overflow: hidden; }
+.kpi::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: transparent; transition: background 0.2s; }
+.kpi:hover { border-color: var(--border2); }
+.kpi.green::before { background: var(--green); }
+.kpi.amber::before { background: var(--amber); }
+.kpi.blue::before { background: var(--blue); }
+.kpi.violet::before { background: var(--violet); }
+.kpi-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.kpi-label { font-size: 11px; color: var(--text2); font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+.kpi-icon { width: 34px; height: 34px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 17px; }
+.kpi-icon.green { background: var(--green-dim); }
+.kpi-icon.amber { background: var(--amber-dim); }
+.kpi-icon.blue { background: var(--blue-dim); }
+.kpi-icon.violet { background: var(--violet-dim); }
+.kpi-val { font-family: var(--display); font-size: 32px; font-weight: 800; letter-spacing: -1.5px; line-height: 1; }
+
+.revenue-strip { background: linear-gradient(135deg, var(--bg2) 0%, var(--bg3) 100%); border: 1px solid var(--border); border-radius: var(--r); padding: 20px 24px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; position: relative; overflow: hidden; }
+.revenue-strip::after { content: 'RD$'; position: absolute; right: 24px; font-family: var(--display); font-size: 80px; font-weight: 800; color: rgba(0,230,118,0.04); line-height: 1; pointer-events: none; }
+.revenue-eyebrow { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 6px; }
+.revenue-val { font-family: var(--display); font-size: 42px; font-weight: 800; color: var(--green); letter-spacing: -2px; line-height: 1; }
+.revenue-meta { font-size: 12px; color: var(--text2); margin-top: 6px; }
+
+.two-col { display: grid; grid-template-columns: 1fr 300px; gap: 14px; }
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
+.card-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.card-title { font-family: var(--display); font-size: 13px; font-weight: 700; letter-spacing: 0.3px; }
+.card-body { padding: 16px 18px; }
+.live-badge { font-size: 9px; background: var(--green-dim); color: var(--green); padding: 3px 8px; border-radius: 99px; font-weight: 700; display: flex; align-items: center; gap: 4px; border: 1px solid rgba(0,230,118,0.2); }
+
+.sys-row { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--border); }
+.sys-row:last-child { border: none; }
+.sys-icon { width: 30px; height: 30px; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+.sys-info { flex: 1; }
+.sys-name { font-size: 12px; font-weight: 600; }
+.sys-sub { font-size: 10px; color: var(--text2); margin-top: 1px; }
+.tag { font-size: 9px; font-weight: 700; padding: 3px 8px; border-radius: 99px; letter-spacing: 0.5px; }
+.tag.green { background: var(--green-dim); color: var(--green); border: 1px solid rgba(0,230,118,0.2); }
+.tag.amber { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(255,171,64,0.2); }
+.tag.red { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255,82,82,0.2); }
+.tag.blue { background: var(--blue-dim); color: var(--blue); border: 1px solid rgba(64,196,255,0.2); }
+.last-sync { padding: 10px 18px; border-top: 1px solid var(--border); font-size: 10px; color: var(--text3); }
+
+.empty-state { text-align: center; padding: 48px 20px; }
+.empty-icon { font-size: 36px; margin-bottom: 10px; }
+.empty-txt { font-size: 13px; color: var(--text2); }
+.empty-sub { font-size: 11px; color: var(--text3); margin-top: 4px; }
+
+/* ORDER CARDS */
+.order-row { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 18px; margin-bottom: 8px; display: flex; align-items: flex-start; gap: 14px; transition: border-color 0.15s; }
+.order-row:hover { border-color: var(--border2); }
+.order-num { font-family: 'Courier New', monospace; font-size: 11px; color: var(--green); background: var(--green-dim); padding: 4px 8px; border-radius: 6px; white-space: nowrap; border: 1px solid rgba(0,230,118,0.15); }
+.order-body { flex: 1; min-width: 0; }
+.order-cust { font-size: 13px; font-weight: 600; margin-bottom: 3px; }
+.order-items-txt { font-size: 11px; color: var(--text2); margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.order-meta { display: flex; gap: 10px; flex-wrap: wrap; }
+.order-meta-item { font-size: 10px; color: var(--text3); }
+.order-total { font-family: var(--display); font-size: 15px; font-weight: 800; color: var(--green); white-space: nowrap; }
+
+/* TABS */
+.tab-bar { display: flex; gap: 3px; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 4px; margin-bottom: 18px; width: fit-content; }
+.tab-btn { padding: 8px 16px; border-radius: 7px; font-size: 12px; font-weight: 600; cursor: pointer; color: var(--text2); border: none; background: none; transition: all 0.15s; font-family: var(--font); display: flex; align-items: center; gap: 6px; }
+.tab-btn.active { background: var(--bg4); color: var(--text); }
+.tab-count { background: var(--bg); color: var(--text3); font-size: 9px; padding: 1px 5px; border-radius: 99px; }
+
+/* INVENTORY */
+.inv-bar { display: flex; gap: 10px; margin-bottom: 18px; align-items: center; }
+.search-in { flex: 1; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 14px; font-size: 13px; color: var(--text); font-family: var(--font); outline: none; transition: border-color 0.2s; }
+.search-in:focus { border-color: var(--green); }
+.search-in::placeholder { color: var(--text3); }
+.btn { padding: 9px 16px; border-radius: 8px; font-size: 12px; font-weight: 700; cursor: pointer; border: none; transition: all 0.15s; font-family: var(--font); display: flex; align-items: center; gap: 6px; letter-spacing: 0.3px; }
+.btn-g { background: var(--green); color: #000; }
+.btn-g:hover { background: var(--green2); box-shadow: 0 4px 14px var(--green-glow); }
+.btn-ghost { background: var(--bg2); color: var(--text2); border: 1px solid var(--border); }
+.btn-ghost:hover { background: var(--bg3); color: var(--text); }
+.btn-del { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255,82,82,0.2); }
+.btn-sm { padding: 5px 10px; font-size: 11px; }
+
+.prod-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.prod-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 14px; transition: border-color 0.15s; }
+.prod-card:hover { border-color: var(--border2); }
+.prod-emoji { font-size: 26px; margin-bottom: 8px; }
+.prod-name { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+.prod-cat { font-size: 10px; color: var(--text3); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+.prod-price { font-family: var(--display); font-size: 17px; font-weight: 800; color: var(--green); margin-bottom: 10px; }
+.prod-foot { display: flex; align-items: center; justify-content: space-between; }
+
+/* FIADO */
+.fiado-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-bottom: 18px; }
+.fiado-stat { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 18px; }
+.fiado-stat-label { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+.fiado-stat-val { font-family: var(--display); font-size: 26px; font-weight: 800; }
+.fiado-stat-val.red { color: var(--red); }
+.fiado-stat-val.green { color: var(--green); }
+
+.client-row { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--border); transition: background 0.15s; }
+.client-row:hover { background: var(--bg3); }
+.client-row:last-child { border: none; }
+.client-av { width: 34px; height: 34px; border-radius: 8px; background: var(--bg4); display: flex; align-items: center; justify-content: center; font-family: var(--display); font-weight: 800; font-size: 13px; color: var(--text2); flex-shrink: 0; }
+.client-info { flex: 1; }
+.client-name { font-size: 13px; font-weight: 600; }
+.client-phone { font-size: 10px; color: var(--text2); }
+.client-bal { font-family: var(--display); font-size: 14px; font-weight: 800; }
+.client-bal.neg { color: var(--red); }
+
+/* CONFIG */
+.cfg-section { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); margin-bottom: 14px; overflow: hidden; }
+.cfg-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+.cfg-head-icon { font-size: 16px; }
+.cfg-head-title { font-family: var(--display); font-size: 13px; font-weight: 700; }
+.cfg-head-sub { font-size: 11px; color: var(--text2); margin-left: auto; }
+.cfg-body { padding: 18px; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.fg3 { grid-template-columns: 1fr 1fr 1fr; }
+.form-g { display: flex; flex-direction: column; gap: 5px; }
+.form-g.full { grid-column: 1/-1; }
+.form-label { font-size: 11px; color: var(--text2); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+.form-in { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 13px; color: var(--text); font-family: var(--font); outline: none; transition: border-color 0.2s; }
+.form-in:focus { border-color: var(--green); }
+.form-sel { background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 13px; color: var(--text); font-family: var(--font); outline: none; }
+.cfg-foot { padding: 14px 18px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
+
+/* CONTACT SECTION */
+.contact-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; }
+.contact-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 18px; text-align: center; transition: border-color 0.2s; }
+.contact-card:hover { border-color: var(--green); }
+.contact-icon { font-size: 28px; margin-bottom: 10px; }
+.contact-title { font-family: var(--display); font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+.contact-email { font-size: 12px; color: var(--green); text-decoration: none; display: block; }
+.contact-email:hover { text-decoration: underline; }
+.contact-desc { font-size: 11px; color: var(--text2); margin-top: 6px; }
+
+/* PLAN BADGE */
+.plan-banner { background: linear-gradient(135deg, #0e1f14 0%, #0a1a10 100%); border: 1px solid rgba(0,230,118,0.2); border-radius: var(--r); padding: 16px 20px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; }
+.plan-left .plan-label { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 4px; }
+.plan-name { font-family: var(--display); font-size: 20px; font-weight: 800; color: var(--green); }
+.plan-features { font-size: 11px; color: var(--text2); margin-top: 4px; }
+.plan-right { text-align: right; }
+.plan-support { font-size: 11px; color: var(--text2); }
+.plan-support a { color: var(--green); text-decoration: none; }
+
+/* MODAL */
+.modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 500; align-items: center; justify-content: center; }
+.modal-bg.open { display: flex; }
+.modal { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 28px; width: 460px; max-width: 90vw; }
+.modal-title { font-family: var(--display); font-size: 18px; font-weight: 800; margin-bottom: 20px; }
+.modal-foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 22px; }
+
+/* TOAST */
+.toast-wrap { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 8px; z-index: 999; }
+.toast { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-size: 13px; display: flex; align-items: center; gap: 10px; animation: toastIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); box-shadow: 0 10px 30px rgba(0,0,0,0.5); max-width: 320px; }
+.toast.ok { border-color: rgba(0,230,118,0.3); }
+.toast.err { border-color: rgba(255,82,82,0.3); }
+@keyframes toastIn { from{transform:translateX(120px) scale(0.8);opacity:0} to{transform:translateX(0) scale(1);opacity:1} }
+
+/* API BANNER */
+.api-setup { background: var(--amber-dim); border: 1px solid rgba(255,171,64,0.2); border-radius: var(--r); padding: 16px 20px; margin-bottom: 20px; display: flex; gap: 14px; align-items: flex-start; font-size: 13px; }
+.api-row { display: flex; gap: 10px; margin-top: 10px; }
+.api-row input { flex: 1; background: var(--bg3); border: 1px solid rgba(255,171,64,0.3); border-radius: 8px; padding: 8px 12px; font-size: 12px; color: var(--text); font-family: monospace; outline: none; }
+
+.spinner { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--green); border-radius: 50%; animation: spin 0.6s linear infinite; }
+@keyframes spin { to{transform:rotate(360deg)} }
+.loading-row { display: flex; align-items: center; gap: 10px; padding: 40px; justify-content: center; color: var(--text2); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div class="login-screen" id="loginScreen">
+  <div>
+    <div class="login-logo">Zo<span>e.</span></div>
+    <div class="login-tagline">by ZemiRD Automations</div>
+  </div>
+  <div class="login-box">
+    <h2>Acceso al Dashboard</h2>
+    <p>Ingresa las credenciales de tu colmado para continuar.</p>
+    <input class="login-input" type="text" id="loginApiUrl" placeholder="https://tu-url.up.railway.app">
+    <input class="login-input" type="password" id="loginPass" placeholder="Contraseña del dashboard" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="login-btn" onclick="doLogin()">ENTRAR AL DASHBOARD →</button>
+    <div class="login-footer">
+      ¿Problemas? Escríbenos a <a href="mailto:support@zemirdautomations.com" style="color:var(--green)">support@zemirdautomations.com</a>
+    </div>
+  </div>
+</div>
+
+<!-- SIDEBAR -->
+<aside class="sidebar">
+  <div class="logo-area">
+    <div class="logo-mark">
+      <div class="logo-icon">🤖</div>
+      <div class="logo-name">Zo<span>e.</span></div>
+    </div>
+    <div class="logo-sub">ZemiRD Automations</div>
+  </div>
+
+  <div class="store-pill">
+    <div class="store-pill-av" id="sidebarAv">C</div>
+    <div>
+      <div class="store-pill-name" id="sidebarName">Colmado</div>
+      <div class="store-pill-plan" id="sidebarPlan">Basic</div>
+    </div>
+    <div class="pulse-dot"></div>
+  </div>
+
+  <nav>
+    <div class="nav-group">
+      <div class="nav-group-label">Principal</div>
+      <button class="nav-btn active" onclick="goPage('dashboard',this)"><span class="n-icon">📊</span> Dashboard</button>
+      <button class="nav-btn" onclick="goPage('pedidos',this)"><span class="n-icon">📦</span> Pedidos <span class="nav-badge" id="navBadge" style="display:none">0</span></button>
+      <button class="nav-btn" onclick="goPage('inventario',this)"><span class="n-icon">🏪</span> Inventario</button>
+      <button class="nav-btn" onclick="goPage('fiado',this)"><span class="n-icon">💳</span> Fiado</button>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Sistema</div>
+      <button class="nav-btn" onclick="goPage('config',this)"><span class="n-icon">⚙️</span> Configuración</button>
+      <button class="nav-btn" onclick="goPage('contacto',this)"><span class="n-icon">📞</span> Soporte</button>
+    </div>
+  </nav>
+
+  <div class="sidebar-foot">
+    <div class="support-card">
+      <div class="support-card-title">ZemiRD Automations</div>
+      <div class="support-card-links">
+        <a class="support-link" href="mailto:support@zemirdautomations.com">✉️ support@zemirdautomations.com</a>
+        <a class="support-link" href="mailto:sales@zemirdautomations.com">💼 sales@zemirdautomations.com</a>
+        <a class="support-link" href="https://zemirdautomations.com" target="_blank">🌐 zemirdautomations.com</a>
+      </div>
+    </div>
+    <button class="nav-btn" onclick="doLogout()"><span class="n-icon">🚪</span> Cerrar Sesión</button>
+  </div>
+</aside>
+
+<!-- MAIN -->
+<main class="main">
+  <div class="topbar">
+    <div class="topbar-title" id="topbarTitle">Dashboard</div>
+    <button class="icon-btn" onclick="refreshAll()" title="Actualizar datos">🔄</button>
+    <div class="live-pill"><div class="pulse-dot" style="width:5px;height:5px"></div> SISTEMA ACTIVO</div>
+  </div>
+
+  <div class="content">
+
+    <!-- API SETUP BANNER -->
+    <div class="api-setup" id="apiBanner">
+      <span style="font-size:22px">⚡</span>
+      <div style="flex:1">
+        <strong style="color:var(--amber)">Conecta tu instancia Railway</strong> — Ingresa la URL de tu bot para datos en tiempo real.
+        <div class="api-row">
+          <input type="text" id="bannerUrl" placeholder="https://zoe-ai-chat-assistant-production.up.railway.app">
+          <button class="btn btn-g btn-sm" onclick="connectFromBanner()">Conectar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ DASHBOARD PAGE ═══ -->
+    <div class="page active" id="page-dashboard">
+      <div class="welcome-banner">
+        <div class="welcome-eyebrow">República Dominicana · ZemiRD Automations</div>
+        <div class="welcome-heading">Bienvenido, <em id="welcomeName">Colmado ZemiRD</em></div>
+        <div class="welcome-sub" id="welcomeDate"></div>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi green"><div class="kpi-top"><div class="kpi-label">Pedidos Activos</div><div class="kpi-icon green">🛒</div></div><div class="kpi-val" id="kpiActive">0</div></div>
+        <div class="kpi amber"><div class="kpi-top"><div class="kpi-label">Sin Dirección</div><div class="kpi-icon amber">⏳</div></div><div class="kpi-val" id="kpiPending">0</div></div>
+        <div class="kpi blue"><div class="kpi-top"><div class="kpi-label">Completados Hoy</div><div class="kpi-icon blue">✅</div></div><div class="kpi-val" id="kpiCompleted">0</div></div>
+        <div class="kpi violet"><div class="kpi-top"><div class="kpi-label">Clientes Únicos</div><div class="kpi-icon violet">👥</div></div><div class="kpi-val" id="kpiCustomers">0</div></div>
+      </div>
+
+      <div class="revenue-strip">
+        <div>
+          <div class="revenue-eyebrow">Ventas de Hoy</div>
+          <div class="revenue-val" id="revenueToday">RD$0</div>
+          <div class="revenue-meta" id="revenueSubtext">0 pedidos completados hoy</div>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="card">
+          <div class="card-head"><div class="card-title">Pedidos Recientes</div><div class="live-badge"><div class="pulse-dot" style="width:4px;height:4px"></div> En vivo</div></div>
+          <div class="card-body" id="recentOrdersBody"><div class="loading-row"><div class="spinner"></div> Cargando pedidos...</div></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><div class="card-title">Estado del Sistema</div></div>
+          <div class="sys-row"><div class="sys-icon" style="background:var(--green-dim)">🤖</div><div class="sys-info"><div class="sys-name">Motor Zoe</div><div class="sys-sub">v4.2 · Claude Sonnet</div></div><div class="tag green">Activo</div></div>
+          <div class="sys-row"><div class="sys-icon" style="background:var(--blue-dim)">💬</div><div class="sys-info"><div class="sys-name">WhatsApp API</div><div class="sys-sub">Twilio Integration</div></div><div class="tag green">Conectado</div></div>
+          <div class="sys-row"><div class="sys-icon" style="background:var(--bg4)">🗄️</div><div class="sys-info"><div class="sys-name">Base de Datos</div><div class="sys-sub">Railway PostgreSQL</div></div><div class="tag" id="dbStatusTag">Verificando</div></div>
+          <div class="sys-row"><div class="sys-icon" style="background:var(--violet-dim)">🌐</div><div class="sys-info"><div class="sys-name">zemirdautomations.com</div><div class="sys-sub">Cloudflare DNS</div></div><div class="tag blue">Activo</div></div>
+          <div class="last-sync">Última sincronización: <span id="lastSync">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ PEDIDOS PAGE ═══ -->
+    <div class="page" id="page-pedidos">
+      <div class="welcome-banner" style="margin-bottom:18px"><div class="welcome-heading" style="font-size:22px">Order Management</div><div class="welcome-sub">Vista en vivo · despacho de pedidos</div></div>
+      <div class="tab-bar">
+        <button class="tab-btn active" onclick="switchTab('active',this)">💬 Activos <span class="tab-count" id="tc-active">0</span></button>
+        <button class="tab-btn" onclick="switchTab('pending',this)">⏳ Sin Dirección <span class="tab-count" id="tc-pending">0</span></button>
+        <button class="tab-btn" onclick="switchTab('completed',this)">✅ Completados <span class="tab-count" id="tc-completed">0</span></button>
+      </div>
+      <div id="ordersBody"><div class="empty-state"><div class="empty-icon">📭</div><div class="empty-txt">No hay pedidos.</div><div class="empty-sub">Conecta tu Railway API para datos en tiempo real.</div></div></div>
+    </div>
+
+    <!-- ═══ INVENTARIO PAGE ═══ -->
+    <div class="page" id="page-inventario">
+      <div class="inv-bar">
+        <input class="search-in" id="searchProd" placeholder="🔍 Buscar productos..." oninput="filterProds()">
+        <button class="btn btn-ghost" onclick="loadDefaultProducts()">🇩🇴 Cargar Productos DR</button>
+        <button class="btn btn-g" onclick="openModal('prodModal')">+ Agregar</button>
+      </div>
+      <div class="prod-grid" id="prodGrid"><div class="loading-row" style="grid-column:1/-1"><div class="spinner"></div> Cargando inventario...</div></div>
+    </div>
+
+    <!-- ═══ FIADO PAGE ═══ -->
+    <div class="page" id="page-fiado">
+      <div class="fiado-grid">
+        <div class="fiado-stat"><div class="fiado-stat-label">Total Pendiente</div><div class="fiado-stat-val red" id="fTotal">RD$0</div></div>
+        <div class="fiado-stat"><div class="fiado-stat-label">Cuentas Activas</div><div class="fiado-stat-val" id="fCount">0</div></div>
+        <div class="fiado-stat"><div class="fiado-stat-label">Promedio por Cliente</div><div class="fiado-stat-val" id="fAvg">RD$0</div></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div class="card-title">Cuentas de Fiado</div><button class="btn btn-g btn-sm" onclick="openModal('fiadoModal')">+ Nueva Cuenta</button></div>
+        <div id="fiadoBody"><div class="empty-state" style="padding:40px"><div class="empty-icon">💳</div><div class="empty-txt">No hay cuentas activas.</div></div></div>
+      </div>
+    </div>
+
+    <!-- ═══ CONFIG PAGE ═══ -->
+    <div class="page" id="page-config">
+      <div class="plan-banner">
+        <div class="plan-left">
+          <div class="plan-label">Plan Activo</div>
+          <div class="plan-name" id="planName">BASIC</div>
+          <div class="plan-features" id="planFeatures">Bot IA + Notificaciones + Despacho ENVIADO</div>
+        </div>
+        <div class="plan-right">
+          <div class="plan-support">¿Upgrade? <a href="mailto:sales@zemirdautomations.com">sales@zemirdautomations.com</a></div>
+          <div class="plan-support" style="margin-top:4px">Soporte: <a href="mailto:support@zemirdautomations.com">support@zemirdautomations.com</a></div>
+        </div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-head"><span class="cfg-head-icon">🏪</span><div class="cfg-head-title">Perfil del Colmado</div></div>
+        <div class="cfg-body">
+          <div class="form-grid">
+            <div class="form-g"><label class="form-label">Nombre del Colmado</label><input class="form-in" id="cfgName" placeholder="Colmado ZemiRD"></div>
+            <div class="form-g"><label class="form-label">Nombre del Dueño</label><input class="form-in" id="cfgOwner" placeholder="Juan Pérez"></div>
+            <div class="form-g"><label class="form-label">Barrio / Sector</label><input class="form-in" id="cfgBarrio" placeholder="Piantini"></div>
+            <div class="form-g"><label class="form-label">Plan</label><select class="form-sel" id="cfgPlan"><option value="starter">Starter — RD$8,000/mo</option><option value="basic">Basic — RD$15,000/mo</option><option value="pro">Pro — RD$35,000/mo</option></select></div>
+            <div class="form-g full"><label class="form-label">Dirección Completa</label><input class="form-in" id="cfgAddress" placeholder="Calle Principal #123, Barrio, Santo Domingo"></div>
+            <div class="form-g"><label class="form-label">Teléfono del Local</label><input class="form-in" id="cfgPhone" placeholder="(809) 466-6253"></div>
+            <div class="form-g"><label class="form-label">WhatsApp del Dueño</label><input class="form-in" id="cfgWhatsapp" placeholder="(809) 466-6253"></div>
+            <div class="form-g"><label class="form-label">WhatsApp del Bot (Twilio)</label><input class="form-in" id="cfgBotNum" placeholder="+14155238886"></div>
+          </div>
+        </div>
+        <div class="cfg-foot"><button class="btn btn-g" onclick="saveProfile()">💾 Guardar Perfil</button></div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-head"><span class="cfg-head-icon">🚚</span><div class="cfg-head-title">Delivery y Operaciones</div></div>
+        <div class="cfg-body">
+          <div class="form-grid">
+            <div class="form-g"><label class="form-label">Horario</label><input class="form-in" id="cfgHours" placeholder="Lun-Dom 7am-10pm"></div>
+            <div class="form-g"><label class="form-label">Tiempo de Entrega</label><input class="form-in" id="cfgDelivery" placeholder="20-30 minutos"></div>
+            <div class="form-g"><label class="form-label">Zona de Delivery</label><input class="form-in" id="cfgZone" placeholder="El barrio y alrededores"></div>
+            <div class="form-g"><label class="form-label">Pedido Mínimo</label><input class="form-in" id="cfgMin" placeholder="RD$100"></div>
+          </div>
+        </div>
+        <div class="cfg-foot"><button class="btn btn-g" onclick="saveDelivery()">💾 Guardar</button></div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-head"><span class="cfg-head-icon">📢</span><div class="cfg-head-title">Promoción de la Semana</div></div>
+        <div class="cfg-body">
+          <div class="form-grid">
+            <div class="form-g"><label class="form-label">Promo 1 (Principal)</label><input class="form-in" id="promo1" placeholder="2x1 en Presidente los viernes"></div>
+            <div class="form-g"><label class="form-label">Promo 2</label><input class="form-in" id="promo2" placeholder="10% de descuento en arroz"></div>
+            <div class="form-g full"><label class="form-label">Promo 3</label><input class="form-in" id="promo3" placeholder="Delivery gratis en pedidos mayores de RD$500"></div>
+          </div>
+        </div>
+        <div class="cfg-foot"><button class="btn btn-g" onclick="savePromos()">💾 Guardar Promos</button></div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-head"><span class="cfg-head-icon">⚡</span><div class="cfg-head-title">Conexión Railway API</div><div class="cfg-head-sub">Datos en tiempo real</div></div>
+        <div class="cfg-body">
+          <div class="form-grid">
+            <div class="form-g full"><label class="form-label">URL del Bot (Railway)</label><input class="form-in" id="cfgApiUrl" placeholder="https://zoe-ai-chat-assistant-production.up.railway.app"></div>
+            <div class="form-g"><label class="form-label">Contraseña Dashboard</label><input class="form-in" type="password" id="cfgApiPass" placeholder="Tu contraseña"></div>
+          </div>
+        </div>
+        <div class="cfg-foot">
+          <button class="btn btn-ghost" onclick="testApi()">🔌 Probar Conexión</button>
+          <button class="btn btn-g" onclick="saveApiSettings()">💾 Guardar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ CONTACTO PAGE ═══ -->
+    <div class="page" id="page-contacto">
+      <div class="welcome-banner" style="margin-bottom:24px">
+        <div class="welcome-heading" style="font-size:22px">Soporte ZemiRD</div>
+        <div class="welcome-sub">Estamos aquí para ayudarte a crecer tu negocio.</div>
+      </div>
+
+      <div class="contact-grid" style="margin-bottom:20px">
+        <div class="contact-card">
+          <div class="contact-icon">🛠️</div>
+          <div class="contact-title">Soporte Técnico</div>
+          <a class="contact-email" href="mailto:support@zemirdautomations.com">support@zemirdautomations.com</a>
+          <div class="contact-desc">Problemas con el bot, errores, configuración</div>
+        </div>
+        <div class="contact-card">
+          <div class="contact-icon">💼</div>
+          <div class="contact-title">Ventas & Onboarding</div>
+          <a class="contact-email" href="mailto:sales@zemirdautomations.com">sales@zemirdautomations.com</a>
+          <div class="contact-desc">Nuevos clientes, upgrades de plan, demos</div>
+        </div>
+        <div class="contact-card">
+          <div class="contact-icon">💰</div>
+          <div class="contact-title">Facturación</div>
+          <a class="contact-email" href="mailto:billing@zemirdautomations.com">billing@zemirdautomations.com</a>
+          <div class="contact-desc">Pagos, facturas, cancelaciones</div>
+        </div>
+        <div class="contact-card">
+          <div class="contact-icon">🤝</div>
+          <div class="contact-title">Alianzas & Partners</div>
+          <a class="contact-email" href="mailto:partners@zemirdautomations.com">partners@zemirdautomations.com</a>
+          <div class="contact-desc">Revendedores, afiliados, integraciones</div>
+        </div>
+        <div class="contact-card">
+          <div class="contact-icon">🌐</div>
+          <div class="contact-title">Sitio Web</div>
+          <a class="contact-email" href="https://zemirdautomations.com" target="_blank">zemirdautomations.com</a>
+          <div class="contact-desc">Portal principal, blog, recursos</div>
+        </div>
+        <div class="contact-card">
+          <div class="contact-icon">📱</div>
+          <div class="contact-title">WhatsApp Soporte</div>
+          <a class="contact-email" href="https://wa.me/18098094666253">+1 (809) 000-0000</a>
+          <div class="contact-desc">Soporte directo vía WhatsApp</div>
+        </div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-head"><span class="cfg-head-icon">📋</span><div class="cfg-head-title">Planes Disponibles</div></div>
+        <div class="cfg-body">
+          <div class="form-grid" style="gap:16px">
+            <div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:18px">
+              <div style="font-family:var(--display);font-size:16px;font-weight:800;color:var(--text);margin-bottom:4px">STARTER</div>
+              <div style="font-family:var(--display);font-size:24px;font-weight:800;color:var(--green)">RD$8,000<span style="font-size:12px;color:var(--text2)">/mes</span></div>
+              <div style="font-size:11px;color:var(--text2);margin-top:8px;line-height:1.8">✅ Bot IA bilingüe<br>✅ Toma de pedidos<br>✅ Consultas de fiado<br>✅ Info básica del negocio</div>
+            </div>
+            <div style="background:var(--bg3);border:1px solid var(--green);border-radius:10px;padding:18px;position:relative">
+              <div style="position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:var(--green);color:#000;font-size:9px;font-weight:800;padding:2px 10px;border-radius:99px;letter-spacing:1px">MÁS POPULAR</div>
+              <div style="font-family:var(--display);font-size:16px;font-weight:800;color:var(--text);margin-bottom:4px">BASIC</div>
+              <div style="font-family:var(--display);font-size:24px;font-weight:800;color:var(--green)">RD$15,000<span style="font-size:12px;color:var(--text2)">/mes</span></div>
+              <div style="font-size:11px;color:var(--text2);margin-top:8px;line-height:1.8">✅ Todo en Starter<br>✅ Notificaciones al dueño<br>✅ Comando ENVIADO<br>✅ Alertas de pedidos pendientes</div>
+            </div>
+            <div style="background:var(--bg3);border:1px solid var(--violet);border-radius:10px;padding:18px">
+              <div style="font-family:var(--display);font-size:16px;font-weight:800;color:var(--text);margin-bottom:4px">PRO</div>
+              <div style="font-family:var(--display);font-size:24px;font-weight:800;color:var(--violet)">RD$35,000<span style="font-size:12px;color:var(--text2)">/mes</span></div>
+              <div style="font-size:11px;color:var(--text2);margin-top:8px;line-height:1.8">✅ Todo en Basic<br>✅ Inventario live (Google Sheets)<br>✅ Memoria de direcciones<br>✅ Dashboard completo<br>✅ REST API endpoints</div>
+            </div>
+          </div>
+          <div style="margin-top:16px;padding:14px;background:var(--bg4);border-radius:8px;font-size:12px;color:var(--text2);text-align:center">
+            ¿Listo para crecer? Escríbenos a <a href="mailto:sales@zemirdautomations.com" style="color:var(--green)">sales@zemirdautomations.com</a> · Primer mes con garantía de satisfacción.
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<!-- MODALS -->
+<div class="modal-bg" id="prodModal">
+  <div class="modal">
+    <div class="modal-title">➕ Agregar Producto</div>
+    <div class="form-grid">
+      <div class="form-g"><label class="form-label">Nombre</label><input class="form-in" id="pName" placeholder="Cerveza Presidente Mediana"></div>
+      <div class="form-g"><label class="form-label">Precio (RD$)</label><input class="form-in" type="number" id="pPrice" placeholder="120"></div>
+      <div class="form-g"><label class="form-label">Categoría</label><input class="form-in" id="pCat" placeholder="Bebidas"></div>
+      <div class="form-g"><label class="form-label">Emoji</label><input class="form-in" id="pEmoji" placeholder="🍺"></div>
+      <div class="form-g full"><label class="form-label">Disponible</label><select class="form-sel" id="pAvail"><option value="true">✅ Sí</option><option value="false">❌ No</option></select></div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal('prodModal')">Cancelar</button><button class="btn btn-g" onclick="saveProd()">Guardar</button></div>
+  </div>
+</div>
+
+<div class="modal-bg" id="fiadoModal">
+  <div class="modal">
+    <div class="modal-title">💳 Nueva Cuenta de Fiado</div>
+    <div class="form-grid">
+      <div class="form-g"><label class="form-label">Nombre del Cliente</label><input class="form-in" id="fName" placeholder="Juan Pérez"></div>
+      <div class="form-g"><label class="form-label">Teléfono</label><input class="form-in" id="fPhone" placeholder="809-466-6253"></div>
+      <div class="form-g full"><label class="form-label">Balance (RD$)</label><input class="form-in" type="number" id="fBal" placeholder="0"></div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-ghost" onclick="closeModal('fiadoModal')">Cancelar</button><button class="btn btn-g" onclick="saveFiado()">Guardar</button></div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script>
+// ── STATE ──
+const ST = {
+  api: localStorage.getItem('z_api') || '',
+  pass: localStorage.getItem('z_pass') || '',
+  orders: { active:[], pending:[], completed:[] },
+  products: JSON.parse(localStorage.getItem('z_products') || '[]'),
+  fiado: JSON.parse(localStorage.getItem('z_fiado') || '[]'),
+  config: JSON.parse(localStorage.getItem('z_config') || '{}'),
+  tab: 'active',
+};
+
+// ── BOOT ──
+document.addEventListener('DOMContentLoaded', () => {
+  setDate();
+  loadLocalConfig();
+  if (ST.api && ST.pass) {
+    document.getElementById('loginScreen').classList.add('hidden');
+    document.getElementById('apiBanner').style.display = 'none';
+    boot();
+  }
+  renderProducts();
+  renderFiado();
+});
+
+function setDate() {
+  const d = new Date();
+  document.getElementById('welcomeDate').textContent =
+    'Resumen de operaciones de Zoe — ' + d.toLocaleDateString('es-DO', {weekday:'long',year:'numeric',month:'long',day:'numeric'});
+}
+
+async function doLogin() {
+  const url = document.getElementById('loginApiUrl').value.trim().replace(/\/$/,'');
+  const pass = document.getElementById('loginPass').value.trim();
+  if (!url || !pass) { toast('⚠️ Ingresa URL y contraseña','err'); return; }
+  try {
+    const r = await fetch(`${url}/api/stats`, { headers: { 'Authorization': pass } });
+    if (r.status === 401) { toast('❌ Contraseña incorrecta','err'); return; }
+    if (!r.ok) throw new Error('Server error');
+    ST.api = url; ST.pass = pass;
+    localStorage.setItem('z_api', url);
+    localStorage.setItem('z_pass', pass);
+    document.getElementById('loginScreen').classList.add('hidden');
+    document.getElementById('apiBanner').style.display = 'none';
+    boot();
+    toast('✅ Conectado exitosamente','ok');
+  } catch(e) {
+    toast('❌ No se pudo conectar al servidor','err');
+  }
+}
+
+function doLogout() {
+  if (!confirm('¿Cerrar sesión?')) return;
+  localStorage.removeItem('z_api'); localStorage.removeItem('z_pass');
+  location.reload();
+}
+
+async function boot() {
+  await fetchStats();
+  await fetchOrders();
+  setInterval(fetchStats, 15000);
+  setInterval(fetchOrders, 20000);
+}
+
+// ── API CALLS ──
+async function apiFetch(path, opts={}) {
+  if (!ST.api) throw new Error('No API URL');
+  const r = await fetch(`${ST.api}${path}`, {
+    ...opts,
+    headers: { 'Authorization': ST.pass, 'Content-Type': 'application/json', ...(opts.headers||{}) }
+  });
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
+
+async function fetchStats() {
+  try {
+    const d = await apiFetch('/api/stats');
+    document.getElementById('kpiActive').textContent = d.activeOrders || 0;
+    document.getElementById('kpiPending').textContent = d.pendingOrders || 0;
+    document.getElementById('kpiCompleted').textContent = d.today?.orders || 0;
+    document.getElementById('kpiCustomers').textContent = d.customers || 0;
+    document.getElementById('revenueToday').textContent = `RD$${(d.today?.revenue||0).toLocaleString('es-DO')}`;
+    document.getElementById('revenueSubtext').textContent = `${d.today?.orders||0} pedidos completados hoy`;
+    document.getElementById('dbStatusTag').textContent = 'Online';
+    document.getElementById('dbStatusTag').className = 'tag green';
+    document.getElementById('lastSync').textContent = new Date().toLocaleTimeString('es-DO');
+
+    const n = document.getElementById('sidebarName');
+    if (d.colmadoName) { n.textContent = d.colmadoName; document.getElementById('sidebarAv').textContent = d.colmadoName[0]; document.getElementById('welcomeName').textContent = d.colmadoName; }
+    if (d.planTier) { document.getElementById('sidebarPlan').textContent = d.planTier.toUpperCase(); document.getElementById('planName').textContent = d.planTier.toUpperCase(); }
+  } catch(e) {
+    document.getElementById('dbStatusTag').textContent = 'Sin conexión';
+    document.getElementById('dbStatusTag').className = 'tag amber';
+  }
+}
+
+async function fetchOrders() {
+  try {
+    const d = await apiFetch('/api/orders');
+    const orders = d.orders || d || [];
+    const today = new Date().toDateString();
+    ST.orders.active = orders.filter(o => ['active','pending_items','in_progress'].includes(o.status));
+    ST.orders.pending = orders.filter(o => o.status === 'pending_address');
+    ST.orders.completed = orders.filter(o => o.status === 'completed' && new Date(o.created_at).toDateString() === today);
+    document.getElementById('tc-active').textContent = ST.orders.active.length;
+    document.getElementById('tc-pending').textContent = ST.orders.pending.length;
+    document.getElementById('tc-completed').textContent = ST.orders.completed.length;
+    const badge = document.getElementById('navBadge');
+    badge.style.display = ST.orders.active.length ? 'inline' : 'none';
+    badge.textContent = ST.orders.active.length;
+    renderRecentOrders(ST.orders.completed.slice(0,5));
+    renderOrdersList();
+  } catch(e) { /* silent fail */ }
+}
+
+function renderRecentOrders(orders) {
+  const el = document.getElementById('recentOrdersBody');
+  if (!orders?.length) { el.innerHTML = '<div class="empty-state"><div class="empty-icon">🛒</div><div class="empty-txt">Sin pedidos completados hoy.</div></div>'; return; }
+  el.innerHTML = orders.map(o => orderHTML(o)).join('');
+}
+
+function renderOrdersList() {
+  const el = document.getElementById('ordersBody');
+  const list = ST.orders[ST.tab] || [];
+  if (!list.length) { el.innerHTML = '<div class="empty-state" style="padding:60px"><div class="empty-icon">📭</div><div class="empty-txt">No hay pedidos en esta categoría.</div></div>'; return; }
+  el.innerHTML = list.map(o => orderHTML(o)).join('');
+}
+
+function orderHTML(o) {
+  const sc = {active:'green',pending_address:'amber',completed:'blue',cancelled:'red'};
+  const sl = {active:'Activo',pending_address:'Sin dirección',completed:'Completado',cancelled:'Cancelado'};
+  return `<div class="order-row">
+    <div class="order-num">${o.order_number||o.id||'ZRD-???'}</div>
+    <div class="order-body">
+      <div class="order-cust">${o.customer_name||o.phone||'Cliente'}</div>
+      <div class="order-items-txt">${fmtItems(o.items)}</div>
+      <div class="order-meta">
+        <div class="order-meta-item">📍 ${o.address||o.delivery_address||'Sin dirección'}</div>
+        <div class="order-meta-item">🕐 ${fmtT(o.created_at||o.createdAt)}</div>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+      <div class="order-total">RD$${parseFloat(o.total||0).toLocaleString('es-DO')}</div>
+      <div class="tag ${sc[o.status]||'green'}">${sl[o.status]||o.status||'—'}</div>
+    </div>
+  </div>`;
+}
+
+function fmtItems(v) { if (!v) return 'Sin detalles'; if (typeof v==='string') return v.replace(/\n/g,' · '); if (Array.isArray(v)) return v.map(i=>`${i.name} x${i.qty||1}`).join(' · '); return 'Sin detalles'; }
+function fmtT(dt) { if (!dt) return '—'; return new Date(dt).toLocaleTimeString('es-DO',{hour:'2-digit',minute:'2-digit'}); }
+
+function switchTab(tab, el) {
+  ST.tab = tab;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  renderOrdersList();
+}
+
+// ── INVENTORY ──
+const DR_PRODUCTS = [
+  {name:'Cerveza Presidente Mediana',price:120,category:'Bebidas',emoji:'🍺'},
+  {name:'Cerveza Presidente Jumbo',price:180,category:'Bebidas',emoji:'🍺'},
+  {name:'Cerveza Presidente Pequeña',price:80,category:'Bebidas',emoji:'🍺'},
+  {name:'Cerveza Brahma',price:100,category:'Bebidas',emoji:'🍻'},
+  {name:'Ron Brugal 750ml',price:650,category:'Licores',emoji:'🥃'},
+  {name:'Ron Barceló 750ml',price:700,category:'Licores',emoji:'🥃'},
+  {name:'Ron Bermúdez 750ml',price:580,category:'Licores',emoji:'🥃'},
+  {name:'Queso Blanco 1lb',price:200,category:'Lácteos',emoji:'🧀'},
+  {name:'Salami 1lb',price:250,category:'Carnes',emoji:'🥩'},
+  {name:'Pollo entero (lb)',price:120,category:'Carnes',emoji:'🍗'},
+  {name:'Arroz Cristal 5lb',price:180,category:'Granos',emoji:'🍚'},
+  {name:'Habichuelas negras 1lb',price:80,category:'Granos',emoji:'🫘'},
+  {name:'Habichuelas rojas 1lb',price:85,category:'Granos',emoji:'🫘'},
+  {name:'Aceite Vegetal 1L',price:220,category:'Cocina',emoji:'🫙'},
+  {name:'Huevos (docena)',price:160,category:'Lácteos',emoji:'🥚'},
+  {name:'Leche Parmalat 1L',price:130,category:'Lácteos',emoji:'🥛'},
+  {name:'Café Santo Domingo 1lb',price:280,category:'Bebidas',emoji:'☕'},
+  {name:'Jugo de naranja 1L',price:120,category:'Bebidas',emoji:'🍊'},
+  {name:'Agua Botellazo 500ml',price:30,category:'Bebidas',emoji:'💧'},
+  {name:'Pan de agua (unidad)',price:15,category:'Panadería',emoji:'🍞'},
+  {name:'Mantequilla Blue Band',price:180,category:'Lácteos',emoji:'🧈'},
+  {name:'Azúcar 5lb',price:200,category:'Cocina',emoji:'🍬'},
+  {name:'Sal 1lb',price:40,category:'Cocina',emoji:'🧂'},
+  {name:'Sopita Maggi (caja)',price:60,category:'Cocina',emoji:'📦'},
+  {name:'Pasta Espiril',price:80,category:'Granos',emoji:'🍝'},
+];
+
+function loadDefaultProducts() { ST.products = DR_PRODUCTS.map(p => ({...p, available:true})); saveProdStorage(); renderProducts(); toast('✅ Productos DR cargados','ok'); }
+
+function renderProducts() {
+  const q = (document.getElementById('searchProd')?.value||'').toLowerCase();
+  const f = ST.products.filter(p => p.name.toLowerCase().includes(q) || p.category.toLowerCase().includes(q));
+  const g = document.getElementById('prodGrid');
+  if (!f.length) { g.innerHTML = '<div class="empty-state" style="grid-column:1/-1;padding:60px"><div class="empty-icon">📦</div><div class="empty-txt">Sin productos.<br>Usa "Cargar Productos DR".</div></div>'; return; }
+  g.innerHTML = f.map((p,i) => `<div class="prod-card"><div class="prod-emoji">${p.emoji||'📦'}</div><div class="prod-name">${p.name}</div><div class="prod-cat">${p.category}</div><div class="prod-price">RD$${p.price}</div><div class="prod-foot"><div class="tag ${p.available?'green':'red'}">${p.available?'Disponible':'Agotado'}</div><button class="btn btn-del btn-sm" onclick="delProd(${i})">🗑</button></div></div>`).join('');
+}
+
+function filterProds() { renderProducts(); }
+function saveProd() {
+  const p = {name:document.getElementById('pName').value,price:parseFloat(document.getElementById('pPrice').value)||0,category:document.getElementById('pCat').value||'General',emoji:document.getElementById('pEmoji').value||'📦',available:document.getElementById('pAvail').value==='true'};
+  if (!p.name||!p.price){toast('⚠️ Nombre y precio requeridos','err');return;}
+  ST.products.push(p); saveProdStorage(); renderProducts(); closeModal('prodModal'); toast('✅ Producto agregado','ok');
+}
+function delProd(i){ST.products.splice(i,1);saveProdStorage();renderProducts();}
+function saveProdStorage(){localStorage.setItem('z_products',JSON.stringify(ST.products));}
+
+// ── FIADO ──
+function renderFiado() {
+  const total = ST.fiado.reduce((s,c)=>s+(c.balance||0),0);
+  document.getElementById('fTotal').textContent = 'RD$'+total.toLocaleString('es-DO');
+  document.getElementById('fCount').textContent = ST.fiado.length;
+  document.getElementById('fAvg').textContent = ST.fiado.length ? 'RD$'+Math.round(total/ST.fiado.length).toLocaleString('es-DO') : 'RD$0';
+  const el = document.getElementById('fiadoBody');
+  if (!ST.fiado.length) { el.innerHTML = '<div class="empty-state" style="padding:40px"><div class="empty-icon">💳</div><div class="empty-txt">Sin cuentas activas.</div></div>'; return; }
+  el.innerHTML = ST.fiado.map((c,i)=>`<div class="client-row"><div class="client-av">${c.name[0].toUpperCase()}</div><div class="client-info"><div class="client-name">${c.name}</div><div class="client-phone">${c.phone||'—'}</div></div><div class="client-bal ${c.balance>0?'neg':''}">RD$${(c.balance||0).toLocaleString('es-DO')}</div><button class="btn btn-del btn-sm" onclick="delFiado(${i})" style="margin-left:10px">🗑</button></div>`).join('');
+}
+function saveFiado(){const c={name:document.getElementById('fName').value,phone:document.getElementById('fPhone').value,balance:parseFloat(document.getElementById('fBal').value)||0};if(!c.name){toast('⚠️ Nombre requerido','err');return;}ST.fiado.push(c);localStorage.setItem('z_fiado',JSON.stringify(ST.fiado));renderFiado();closeModal('fiadoModal');toast('✅ Cuenta creada','ok');}
+function delFiado(i){ST.fiado.splice(i,1);localStorage.setItem('z_fiado',JSON.stringify(ST.fiado));renderFiado();}
+
+// ── CONFIG ──
+function loadLocalConfig() {
+  const c = ST.config;
+  const map = {cfgName:'name',cfgOwner:'owner',cfgBarrio:'barrio',cfgAddress:'address',cfgPhone:'phone',cfgWhatsapp:'whatsapp',cfgBotNum:'botNum',cfgHours:'hours',cfgDelivery:'delivery',cfgZone:'zone',cfgMin:'min',promo1:'promo1',promo2:'promo2',promo3:'promo3'};
+  Object.entries(map).forEach(([id,k])=>{ const el=document.getElementById(id); if(el&&c[k]) el.value=c[k]; });
+  if (ST.api) { const u=document.getElementById('cfgApiUrl'); if(u) u.value=ST.api; }
+  if (c.name) { document.getElementById('welcomeName').textContent=c.name; document.getElementById('sidebarName').textContent=c.name; document.getElementById('sidebarAv').textContent=c.name[0]; }
+}
+
+function saveProfile() {
+  ['name','owner','barrio','address','phone','whatsapp','botNum'].forEach((k,i)=>{
+    const ids = ['cfgName','cfgOwner','cfgBarrio','cfgAddress','cfgPhone','cfgWhatsapp','cfgBotNum'];
+    const el = document.getElementById(ids[i]); if(el) ST.config[k]=el.value;
+  });
+  persist(); loadLocalConfig(); toast('✅ Perfil guardado','ok');
+}
+function saveDelivery(){['hours','delivery','zone','min'].forEach((k,i)=>{const ids=['cfgHours','cfgDelivery','cfgZone','cfgMin'];const el=document.getElementById(ids[i]);if(el)ST.config[k]=el.value;});persist();toast('✅ Delivery guardado','ok');}
+function savePromos(){['promo1','promo2','promo3'].forEach(k=>{const el=document.getElementById(k);if(el)ST.config[k]=el.value;});persist();toast('✅ Promos guardadas','ok');}
+function persist(){localStorage.setItem('z_config',JSON.stringify(ST.config));}
+
+function saveApiSettings(){const u=document.getElementById('cfgApiUrl').value.trim().replace(/\/$/,'');const p=document.getElementById('cfgApiPass').value.trim();if(!u||!p){toast('⚠️ URL y contraseña requeridos','err');return;}ST.api=u;ST.pass=p;localStorage.setItem('z_api',u);localStorage.setItem('z_pass',p);document.getElementById('apiBanner').style.display='none';boot();toast('✅ API configurada','ok');}
+
+async function testApi(){const u=document.getElementById('cfgApiUrl').value.trim();const p=document.getElementById('cfgApiPass').value.trim();if(!u){toast('⚠️ Ingresa URL primero','err');return;}try{const r=await fetch(`${u}/`,{headers:{Authorization:p}});if(r.ok){toast('✅ Servidor alcanzable y online','ok');}else throw new Error();}catch{toast('❌ No se pudo conectar','err');}}
+
+function connectFromBanner(){const u=document.getElementById('bannerUrl').value.trim().replace(/\/$/,'');if(!u){toast('⚠️ Ingresa una URL','err');return;}ST.api=u;localStorage.setItem('z_api',u);document.getElementById('apiBanner').style.display='none';document.getElementById('loginScreen').classList.add('hidden');boot();toast('✅ Conectado','ok');}
+
+// ── NAV ──
+function goPage(page, el) {
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('page-'+page).classList.add('active');
+  el.classList.add('active');
+  const t={dashboard:'Dashboard',pedidos:'Order Management',inventario:'Inventario',fiado:'Fiado / Crédito',config:'Configuración',contacto:'Soporte ZemiRD'};
+  document.getElementById('topbarTitle').textContent=t[page]||page;
+}
+
+async function refreshAll(){await fetchStats();await fetchOrders();toast('🔄 Actualizado','ok');}
+
+// ── MODALS ──
+function openModal(id){document.getElementById(id).classList.add('open');}
+function closeModal(id){document.getElementById(id).classList.remove('open');}
+
+// ── TOAST ──
+function toast(msg,type='ok'){const w=document.getElementById('toastWrap'),el=document.createElement('div');el.className=`toast ${type}`;el.textContent=msg;w.appendChild(el);setTimeout(()=>el.remove(),3500);}
+</script>
+</body>
+</html>
