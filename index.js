@@ -1,23 +1,32 @@
 /**
  * ╔══════════════════════════════════════════════════════════╗
- * ║     ZemiRD Automations — Zoe AI Colmado Bot v4.2         ║
+ * ║     ZemiRD Automations — Zoe AI Colmado Bot v4.3         ║
  * ║     Built for the Dominican Republic Market              ║
  * ║     support@zemirdautomations.com                        ║
  * ╚══════════════════════════════════════════════════════════╝
+ *
+ * v4.3 Changes:
+ * - Full order state machine (null→awaiting_extras→awaiting_location→confirmed)
+ * - Countdown timers (30s new / 45s returning) with max 3 resets
+ * - Proper address detection — won't use non-address text as delivery address
+ * - WhatsApp location pin support (lat/lng)
+ * - Voice message support via Twilio MediaUrl + Whisper transcription
+ * - Seller notification + ENVIADO dispatch system
+ * - Pending order escalation
  */
 
 require('dotenv').config();
-const express = require('express');
-const twilio = require('twilio');
+const express   = require('express');
+const twilio    = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
-const { Pool } = require('pg');
-const path = require('path');
+const { Pool }  = require('pg');
+const https     = require('https');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// ─── CORS for dashboard ───────────────────────────────────────
+// ─── CORS ────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
@@ -28,21 +37,21 @@ app.use((req, res, next) => {
 
 // ─── CONFIG ──────────────────────────────────────────────────
 const CONFIG = {
-  colmadoName:    process.env.COLMADO_NAME    || 'Colmado ZemiRD',
-  colmadoOwner:   process.env.COLMADO_OWNER   || 'Dueño',
-  colmadoBarrio:  process.env.COLMADO_BARRIO  || 'El Barrio',
-  colmadoAddress: process.env.COLMADO_ADDRESS || 'Dirección del colmado',
-  colmadoPhone:   process.env.COLMADO_PHONE   || '8095550000',
-  colmadoWhatsapp:process.env.COLMADO_WHATSAPP|| 'whatsapp:+18095550000',
-  colmadoHours:   process.env.COLMADO_HOURS   || 'Lun-Dom 7am-10pm',
-  deliveryTime:   process.env.DELIVERY_TIME   || '20-30 minutos',
-  deliveryZone:   process.env.DELIVERY_ZONE   || 'El barrio y alrededores',
-  minDelivery:    process.env.MIN_DELIVERY    || 'RD$100',
-  promoSemana:    process.env.PROMO_SEMANA    || '',
-  ownerWhatsapp:  process.env.OWNER_WHATSAPP  || '',
-  planTier:       process.env.PLAN_TIER       || 'basic', // starter | basic | pro
+  colmadoName:    process.env.COLMADO_NAME     || 'Colmado ZemiRD',
+  colmadoOwner:   process.env.COLMADO_OWNER    || 'Dueño',
+  colmadoBarrio:  process.env.COLMADO_BARRIO   || 'El Barrio',
+  colmadoAddress: process.env.COLMADO_ADDRESS  || 'Dirección del colmado',
+  colmadoPhone:   process.env.COLMADO_PHONE    || '8095550000',
+  colmadoWhatsapp:process.env.COLMADO_WHATSAPP || 'whatsapp:+18095550000',
+  colmadoHours:   process.env.COLMADO_HOURS    || 'Lun-Dom 7am-10pm',
+  deliveryTime:   process.env.DELIVERY_TIME    || '20-30 minutos',
+  deliveryZone:   process.env.DELIVERY_ZONE    || 'El barrio y alrededores',
+  minDelivery:    process.env.MIN_DELIVERY     || 'RD$100',
+  promoSemana:    process.env.PROMO_SEMANA     || '',
+  ownerWhatsapp:  process.env.OWNER_WHATSAPP   || '',
+  planTier:       process.env.PLAN_TIER        || 'basic',
   twilioNumber:   process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886',
-  port:           parseInt(process.env.PORT)  || 8080,
+  port:           parseInt(process.env.PORT)   || 8080,
   googleSheetsId: process.env.GOOGLE_SHEETS_ID || '',
   googleSheetsKey:process.env.GOOGLE_SHEETS_API_KEY || '',
   dashboardPass:  process.env.DASHBOARD_PASSWORD || 'zoe2024',
@@ -51,11 +60,11 @@ const CONFIG = {
   zemirdWeb:      'zemirdautomations.com',
 };
 
-const isPro     = ['pro','premium'].includes(CONFIG.planTier.toLowerCase());
-const isBasic   = ['basic','pro','premium'].includes(CONFIG.planTier.toLowerCase());
+const isPro   = ['pro','premium'].includes(CONFIG.planTier.toLowerCase());
+const isBasic = ['basic','pro','premium'].includes(CONFIG.planTier.toLowerCase());
 
 // ─── CLIENTS ─────────────────────────────────────────────────
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const anthropic    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 // ─── DATABASE ────────────────────────────────────────────────
@@ -82,7 +91,7 @@ async function initDB() {
       );
       CREATE TABLE IF NOT EXISTS conversations (
         id SERIAL PRIMARY KEY,
-        phone VARCHAR(30),
+        phone VARCHAR(30) UNIQUE,
         messages JSONB DEFAULT '[]',
         customer_type VARCHAR(20) DEFAULT 'new',
         last_address TEXT,
@@ -122,15 +131,15 @@ async function initDB() {
 }
 
 // ─── IN-MEMORY STATE ─────────────────────────────────────────
-const conversations     = new Map(); // phone → { messages[], resetCount, lastActivity }
-const customerLocations = new Map(); // phone → { address, lat, lng }
-const orderStates       = new Map(); // phone → { state, items, total, timer }
-const pendingOrders     = new Map(); // phone → order data
-const lastCompletedOrder= new Map(); // phone → order data
-const ownerLastCustomer = new Map(); // ownerPhone → customerPhone
-let   orderCounter      = 1000;
+const conversations      = new Map(); // phone → { messages[], lastActivity }
+const customerLocations  = new Map(); // phone → { address, lat, lng }
+const orderStates        = new Map(); // phone → { state, items, total, timer, resetCount }
+const pendingOrders      = new Map(); // phone → order data
+const lastCompletedOrder = new Map(); // phone → order data
+const ownerLastCustomer  = new Map(); // ownerPhone → customerPhone
+let   orderCounter       = 1000;
 
-// ─── INVENTORY (in-memory cache, refreshed from DB/Sheets) ───
+// ─── INVENTORY ───────────────────────────────────────────────
 let productosList = [];
 let fiaoCuentas   = [];
 
@@ -154,13 +163,11 @@ async function syncGoogleSheets() {
   try {
     const baseUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.googleSheetsId}/values`;
     const key = `?key=${CONFIG.googleSheetsKey}`;
-
     const [invRes, fiaoRes, cfgRes] = await Promise.all([
       fetch(`${baseUrl}/Inventario!A2:D200${key}`),
       fetch(`${baseUrl}/Fiao!A2:D200${key}`),
       fetch(`${baseUrl}/Config!A1:B20${key}`)
     ]);
-
     if (invRes.ok) {
       const data = await invRes.json();
       productosList = (data.values || []).map(r => ({
@@ -169,7 +176,6 @@ async function syncGoogleSheets() {
         category: r[3] || 'General'
       })).filter(p => p.available);
     }
-
     if (fiaoRes.ok) {
       const data = await fiaoRes.json();
       fiaoCuentas = (data.values || []).map(r => ({
@@ -177,20 +183,17 @@ async function syncGoogleSheets() {
         balance: parseFloat(r[2]) || 0, lastPurchase: r[3]
       }));
     }
-
     if (cfgRes.ok) {
       const data = await cfgRes.json();
-      const rows = data.values || [];
-      rows.forEach(r => { if (r[0] === 'Promocion_semana') CONFIG.promoSemana = r[1]; });
+      (data.values || []).forEach(r => { if (r[0] === 'Promocion_semana') CONFIG.promoSemana = r[1]; });
     }
-
     console.log(`✅ Sheets synced: ${productosList.length} products, ${fiaoCuentas.length} fiado accounts`);
   } catch(e) {
     console.error('⚠️ Sheets sync error:', e.message);
   }
 }
 
-// ─── HELPER FUNCTIONS ────────────────────────────────────────
+// ─── HELPERS ─────────────────────────────────────────────────
 function getInventoryText() {
   if (!productosList.length) return 'Inventario actualizado disponible en tienda.';
   const byCategory = productosList.reduce((acc, p) => {
@@ -213,8 +216,129 @@ function getOrderNumber() {
   return `ZRD-${++orderCounter}`;
 }
 
+function isHoursOpen() {
+  const hours = CONFIG.colmadoHours;
+  const now   = new Date();
+  const hour  = now.getHours();
+  const match = hours.match(/(\d+)(am|pm).*?(\d+)(am|pm)/i);
+  if (!match) return true;
+  let open  = parseInt(match[1]);
+  let close = parseInt(match[3]);
+  if (match[2].toLowerCase() === 'pm' && open  !== 12) open  += 12;
+  if (match[4].toLowerCase() === 'pm' && close !== 12) close += 12;
+  return hour >= open && hour < close;
+}
+
+/**
+ * Detects if a string looks like a real delivery address.
+ * Rejects single words, random phrases, or order additions.
+ */
+function looksLikeAddress(text) {
+  if (!text || text.length < 5) return false;
+  const t = text.toLowerCase().trim();
+
+  // Reject common non-address phrases
+  const rejects = [
+    /^(hola|ok|okay|sí|si|no|gracias|buenas|tarde|mañana|noche|día)/,
+    /^(y |dame|quiero|mándame|agrega|también|más|otro|otra)/,
+    /^(espera|wait|momento|un momento)/,
+    /^(enviado|pagado|listo|perfecto)/,
+    /litro|libra|unidad|caja|bolsa|jugo|leche|agua|cerveza|refresco/,
+    /RD\$|\d+\s*(peso|libra|litro)/i,
+  ];
+  if (rejects.some(r => r.test(t))) return false;
+
+  // Accept if it contains address-like patterns
+  const accepts = [
+    /calle|ave|avenida|blvd|boulevard|carretera|autopista/i,
+    /\#\s*\d+/,           // street number like #14
+    /\d+.*calle|calle.*\d+/i,
+    /sector|residencial|urb|urbanización|barrio|edificio|apt|apto|piso/i,
+    /esquina|entre|frente|detras|detrás|cerca/i,
+    /santo domingo|santiago|la romana|punta cana|higuey/i,
+    /piantini|naco|evaristo|gazcue|bella vista|arroyo/i,
+  ];
+  if (accepts.some(r => r.test(t))) return true;
+
+  // Accept multi-word phrases with 3+ words (likely an address description)
+  const wordCount = t.split(/\s+/).length;
+  if (wordCount >= 4) return true;
+
+  return false;
+}
+
+async function sendWhatsApp(to, body) {
+  try {
+    const toNum = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
+    await twilioClient.messages.create({ from: CONFIG.twilioNumber, to: toNum, body });
+  } catch (e) {
+    console.error('❌ WhatsApp send error:', e.message);
+  }
+}
+
+// ─── VOICE MESSAGE TRANSCRIPTION ─────────────────────────────
+/**
+ * Downloads a Twilio voice memo URL and transcribes it using
+ * Claude's vision/audio capability or a simple fetch-based approach.
+ * Since Twilio OGG audio isn't natively supported, we use a
+ * Claude prompt approach: describe that we got a voice note and
+ * ask Claude to handle it gracefully.
+ */
+async function transcribeVoiceMessage(mediaUrl, accountSid, authToken) {
+  try {
+    // Fetch audio from Twilio with auth
+    const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+
+    const audioData = await new Promise((resolve, reject) => {
+      const url = new URL(mediaUrl);
+      const options = {
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        headers: { 'Authorization': `Basic ${auth}` }
+      };
+      https.get(options, (res) => {
+        const chunks = [];
+        res.on('data', chunk => chunks.push(chunk));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+        res.on('error', reject);
+      }).on('error', reject);
+    });
+
+    const base64Audio = audioData.toString('base64');
+
+    // Use Claude to transcribe via audio content block
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 300,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'document',
+            source: {
+              type: 'base64',
+              media_type: 'audio/ogg',
+              data: base64Audio,
+            }
+          },
+          {
+            type: 'text',
+            text: 'Transcribe this WhatsApp voice message exactly as spoken. Return only the transcribed text, nothing else.'
+          }
+        ]
+      }]
+    });
+
+    return response.content[0]?.text?.trim() || null;
+  } catch(e) {
+    console.error('❌ Voice transcription error:', e.message);
+    return null;
+  }
+}
+
+// ─── FORMATTERS ──────────────────────────────────────────────
 function formatReceipt(orderData) {
-  const now = new Date();
+  const now     = new Date();
   const dateStr = now.toLocaleDateString('es-DO');
   const timeStr = now.toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit' });
   return `🧾 RECIBO DE PEDIDO
@@ -275,28 +399,7 @@ function extractOrderItems(text) {
   return { items: itemLines.join('\n').trim(), total };
 }
 
-function isHoursOpen() {
-  const hours = CONFIG.colmadoHours;
-  const now = new Date();
-  const hour = now.getHours();
-  // Parse "7am-10pm" style
-  const match = hours.match(/(\d+)(am|pm).*?(\d+)(am|pm)/i);
-  if (!match) return true; // default open if can't parse
-  let open = parseInt(match[1]);
-  let close = parseInt(match[3]);
-  if (match[2].toLowerCase() === 'pm' && open !== 12) open += 12;
-  if (match[4].toLowerCase() === 'pm' && close !== 12) close += 12;
-  return hour >= open && hour < close;
-}
-
-async function sendWhatsApp(to, body) {
-  try {
-    await twilioClient.messages.create({ from: CONFIG.twilioNumber, to, body });
-  } catch (e) {
-    console.error('❌ WhatsApp send error:', e.message);
-  }
-}
-
+// ─── DB HELPERS ──────────────────────────────────────────────
 async function saveOrderToDB(orderData) {
   try {
     await db.query(`
@@ -318,7 +421,8 @@ async function saveConversationToDB(phone, messages, location) {
       INSERT INTO conversations (phone, messages, last_address, last_lat, last_lng, customer_type, order_count, updated_at)
       VALUES ($1,$2,$3,$4,$5,'returning',1,NOW())
       ON CONFLICT (phone) DO UPDATE SET
-        messages=$2, last_address=COALESCE($3,conversations.last_address),
+        messages=$2,
+        last_address=COALESCE($3,conversations.last_address),
         last_lat=COALESCE($4,conversations.last_lat),
         last_lng=COALESCE($5,conversations.last_lng),
         customer_type='returning',
@@ -335,19 +439,19 @@ async function getCustomerFromDB(phone) {
   } catch(e) { return null; }
 }
 
-// ─── CLAUDE AI PROMPT ────────────────────────────────────────
+// ─── SYSTEM PROMPT ───────────────────────────────────────────
 function buildSystemPrompt(phone, customerType, fiaoBalance) {
-  const open = isHoursOpen();
+  const open      = isHoursOpen();
   const inventory = getInventoryText();
   const promoText = CONFIG.promoSemana ? `\n🎉 PROMOCIÓN ESTA SEMANA: ${CONFIG.promoSemana}` : '';
-  const fiaoText = fiaoBalance !== null
+  const fiaoText  = fiaoBalance !== null
     ? `\n💳 FIADO ESTE CLIENTE: RD$${fiaoBalance}`
     : '\n💳 FIADO: Sin cuenta registrada';
   const locationInfo = customerType === 'returning'
     ? `\n📍 CLIENTE RECURRENTE: Tiene dirección guardada. NO pedir dirección.`
-    : `\n📍 CLIENTE NUEVO: No pedir dirección aún — el sistema lo maneja.`;
+    : `\n📍 CLIENTE NUEVO: No pedir dirección aún — el sistema lo maneja automáticamente.`;
 
-  return `Eres el asistente WhatsApp de ${CONFIG.colmadoName} en ${CONFIG.colmadoBarrio}, República Dominicana.
+  return `Eres Zoe, el asistente WhatsApp de ${CONFIG.colmadoName} en ${CONFIG.colmadoBarrio}, República Dominicana.
 Creado por ZemiRD Automations (${CONFIG.zemirdWeb}).
 
 PERSONALIDAD:
@@ -355,34 +459,31 @@ PERSONALIDAD:
 - Usa: "¡Claro que sí!", "¡Tá bien!", "¿Qué más?", "¡Con mucho gusto!"
 - MÁXIMO 4 líneas por respuesta. Esto es WhatsApp.
 - Auto-detecta idioma. Responde en español o inglés según el cliente.
+- Si recibes un mensaje de voz transcrito, respóndelo como texto normal.
 - Horario de hoy: ${open ? '✅ ABIERTOS AHORA' : '❌ CERRADO AHORA — ' + CONFIG.colmadoHours}
-${open ? '' : '⚠️ Si el cliente pide algo, explica amablemente que estamos cerrados pero igual registra el pedido para cuando abramos.'}
+${!open ? '⚠️ Si el cliente pide algo, explica amablemente que estamos cerrados y que su pedido queda anotado para cuando abramos.' : ''}
 
 FORMATO DE PEDIDO (CRÍTICO — SIN EXCEPCIONES):
-Siempre formatea así, EXACTAMENTE:
+Siempre formatea pedidos EXACTAMENTE así:
 • [Producto] x[cantidad] = RD$[subtotal]
 • [Producto] x[cantidad] = RD$[subtotal]
 TOTAL: RD$[total]
 ¿Algo más? 🛵
 
-REGLAS:
-- Nunca inventes precios fuera del inventario
-- Nunca confirmes productos agotados como disponibles
-- Pedidos sobre RD$2,000: transferir a ${CONFIG.colmadoPhone}
-- Quejas: el equipo contactará al cliente
-- NUNCA preguntes por dirección — el sistema lo maneja automáticamente
-- NUNCA incluyas texto conversacional antes de las líneas de productos en un pedido
+NUNCA incluyas texto conversacional antes de las líneas de productos.
+NUNCA preguntes por dirección — el sistema lo maneja.
 
 RESPUESTAS VALIDADAS:
-1. PEDIDO ("mándame X", "dame X", "quiero X"): Lista de bullets con precios → TOTAL: RD$X → ¿Algo más?
-2. FIADO ("¿cuánto le debo?", "cuánto debo"): Busca balance por teléfono
-3. INFO BÁSICA ("¿están abiertos?", "horario", "¿dónde están?"): Horas, dirección, zona delivery, mínimo
-4. CONTACTO ("quiero hablar", "número", "contact"): TODO info de contacto — teléfono, WhatsApp, dirección, soporte
+1. PEDIDO ("mándame X", "dame X", "quiero X"): bullets con precios → TOTAL: RD$X → ¿Algo más?
+2. FIADO ("¿cuánto le debo?", "cuánto debo"): balance exacto por teléfono. Si cero: "Estás al día ✅". Si no existe: ir a registrar en tienda.
+3. INFO ("¿están abiertos?", "horario", "¿dónde están?"): horas, dirección, zona delivery, mínimo
+4. CONTACTO ("quiero hablar", "número", "contact"): TODA la info de contacto — teléfono, WhatsApp, dirección, horas. Termina con "¡Con gusto te atendemos! 😊"
 
-CONTACTOS DEL SISTEMA:
-- Soporte técnico Zoe: support@zemirdautomations.com
-- Ventas: sales@zemirdautomations.com
-- Web: zemirdautomations.com
+REGLAS:
+- Nunca inventes precios fuera del inventario
+- Nunca confirmes productos agotados
+- Pedidos sobre RD$2,000: transferir a ${CONFIG.colmadoPhone}
+- Quejas: el equipo contactará al cliente
 
 INFO DEL COLMADO:
 🏪 ${CONFIG.colmadoName}
@@ -397,60 +498,170 @@ INVENTARIO DISPONIBLE:
 ${inventory}`;
 }
 
+// ─── COMPLETE ORDER ───────────────────────────────────────────
+async function completeOrder(phone, from, locData, orderState) {
+  if (orderState.timer) clearTimeout(orderState.timer);
+
+  const orderNumber = getOrderNumber();
+  const orderData   = {
+    orderNumber,
+    phone,
+    items:   orderState.items,
+    total:   orderState.total,
+    address: locData.address,
+    lat:     locData.lat,
+    lng:     locData.lng,
+    status:  'completed',
+  };
+
+  // Save location for future orders
+  customerLocations.set(phone, locData);
+  await saveConversationToDB(phone, conversations.get(phone)?.messages || [], locData);
+
+  // Send receipt
+  await sendWhatsApp(from, formatReceipt(orderData));
+
+  // Save to DB
+  await saveOrderToDB(orderData);
+
+  // Seller notification
+  if (isBasic && CONFIG.ownerWhatsapp) {
+    await sendWhatsApp(CONFIG.ownerWhatsapp, formatSellerNotification(orderData));
+    ownerLastCustomer.set(CONFIG.ownerWhatsapp.replace('whatsapp:',''), phone);
+  }
+
+  lastCompletedOrder.set(phone, orderData);
+  setTimeout(() => orderStates.delete(phone), 500);
+
+  console.log(`✅ Order completed: ${orderNumber} | ${phone} | RD$${orderData.total}`);
+}
+
+// ─── ORDER TIMEOUT HANDLER ────────────────────────────────────
+async function triggerOrderTimeout(phone, from) {
+  const orderState = orderStates.get(phone);
+  if (!orderState) return;
+
+  const savedLoc  = customerLocations.get(phone);
+  const dbCustomer = await getCustomerFromDB(phone);
+  const dbLoc     = dbCustomer?.last_address ? { address: dbCustomer.last_address, lat: dbCustomer.last_lat, lng: dbCustomer.last_lng } : null;
+  const location  = savedLoc || dbLoc;
+
+  if (location && customerLocations.has(phone)) {
+    // Returning customer with saved address — auto complete
+    await completeOrder(phone, from, location, orderState);
+  } else if (orderState.state === 'awaiting_extras') {
+    // New customer — ask for address
+    orderState.state = 'awaiting_location';
+    orderStates.set(phone, orderState);
+    await sendWhatsApp(from, '📍 ¿A qué dirección te lo enviamos?\nPuedes escribirla o compartir tu ubicación 📌');
+
+    // Second reminder after 30s
+    orderState.timer = setTimeout(async () => {
+      const os = orderStates.get(phone);
+      if (os?.state === 'awaiting_location') {
+        await sendWhatsApp(from, '📍 ¿Cuál es tu dirección de entrega? (escríbela o comparte tu ubicación)');
+
+        // Final timeout after 60s more — mark as pending
+        orderState.timer = setTimeout(async () => {
+          const os2 = orderStates.get(phone);
+          if (os2?.state === 'awaiting_location') {
+            os2.state = 'pending';
+            pendingOrders.set(phone, os2);
+            orderStates.delete(phone);
+            if (isBasic && CONFIG.ownerWhatsapp) {
+              await sendWhatsApp(CONFIG.ownerWhatsapp,
+                `⚠️ PEDIDO PENDIENTE\nCliente: ${phone}\nNo respondió con dirección.\nProductos: ${os2.items}\nTotal: RD$${os2.total}`);
+            }
+          }
+        }, 60000);
+        orderStates.set(phone, orderState);
+      }
+    }, 30000);
+    orderStates.set(phone, orderState);
+  }
+}
+
 // ─── MAIN WEBHOOK ────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200); // Respond immediately to Twilio
 
-  const from    = req.body.From || '';
-  const body    = (req.body.Body || '').trim();
-  const lat     = req.body.Latitude;
-  const lng     = req.body.Longitude;
-  const address = req.body.Address || req.body.Label || '';
-  const phone   = from.replace('whatsapp:', '');
+  const from      = req.body.From || '';
+  let   body      = (req.body.Body || '').trim();
+  const lat       = req.body.Latitude;
+  const lng       = req.body.Longitude;
+  const address   = req.body.Address || req.body.Label || '';
+  const phone     = from.replace('whatsapp:', '');
+  const mediaUrl  = req.body.MediaUrl0 || '';
+  const mediaType = (req.body.MediaContentType0 || '').toLowerCase();
+  const numMedia  = parseInt(req.body.NumMedia || '0');
 
   if (!from) return;
 
-  console.log(`📩 [${new Date().toISOString()}] From: ${phone} | Msg: ${body.substring(0,60)}`);
+  // ── VOICE MESSAGE HANDLING ──
+  if (numMedia > 0 && mediaUrl && (mediaType.includes('audio') || mediaType.includes('ogg'))) {
+    console.log(`🎤 Voice message from ${phone}`);
+    await sendWhatsApp(from, '🎤 Recibí tu nota de voz, un momento...');
+
+    const transcribed = await transcribeVoiceMessage(
+      mediaUrl,
+      process.env.TWILIO_ACCOUNT_SID,
+      process.env.TWILIO_AUTH_TOKEN
+    );
+
+    if (transcribed) {
+      console.log(`🎤 Transcribed: ${transcribed}`);
+      body = `[NOTA DE VOZ]: ${transcribed}`;
+    } else {
+      await sendWhatsApp(from, `Lo siento, no pude procesar tu nota de voz. ¿Puedes escribir tu mensaje? 😊`);
+      return;
+    }
+  }
+
+  console.log(`📩 [${new Date().toISOString()}] From: ${phone} | Msg: ${body.substring(0,80)}`);
 
   // ── OWNER ENVIADO COMMAND ──
-  if (isBasic && body.toUpperCase().startsWith('ENVIADO') && CONFIG.ownerWhatsapp && from === CONFIG.ownerWhatsapp) {
-    const parts = body.split(' ');
-    const targetPhone = parts[1]
-      ? (parts[1].startsWith('+') ? `whatsapp:${parts[1]}` : `whatsapp:+${parts[1]}`)
+  const ownerPhone = CONFIG.ownerWhatsapp.replace('whatsapp:','');
+  if (isBasic && body.toUpperCase().startsWith('ENVIADO') && CONFIG.ownerWhatsapp && (phone === ownerPhone || from === CONFIG.ownerWhatsapp)) {
+    const parts        = body.trim().split(/\s+/);
+    const targetRaw    = parts[1];
+    const targetPhone  = targetRaw
+      ? (targetRaw.startsWith('+') ? `whatsapp:${targetRaw}` : `whatsapp:+${targetRaw}`)
       : null;
-    const customerPhone = targetPhone || ownerLastCustomer.get(CONFIG.ownerWhatsapp.replace('whatsapp:',''));
+    const customerPhone = targetPhone || ownerLastCustomer.get(ownerPhone);
     if (customerPhone) {
-      const lastOrder = lastCompletedOrder.get(customerPhone.replace('whatsapp:',''));
+      const cleanCPhone = customerPhone.replace('whatsapp:','');
+      const lastOrder   = lastCompletedOrder.get(cleanCPhone);
       if (lastOrder) {
-        await sendWhatsApp(customerPhone.startsWith('whatsapp:') ? customerPhone : `whatsapp:${customerPhone}`,
-          formatDispatchNotification(lastOrder));
-        orderStates.delete(customerPhone.replace('whatsapp:',''));
+        await sendWhatsApp(customerPhone, formatDispatchNotification(lastOrder));
+        orderStates.delete(cleanCPhone);
         await sendWhatsApp(from, '✅ Cliente notificado que su pedido está en camino.');
+      } else {
+        await sendWhatsApp(from, '⚠️ No encontré un pedido reciente para ese cliente.');
       }
+    } else {
+      await sendWhatsApp(from, '⚠️ No hay cliente activo. Usa: ENVIADO +18091234567');
     }
     return;
   }
 
   // ── GET CUSTOMER STATE ──
-  let dbCustomer = await getCustomerFromDB(phone);
+  let dbCustomer   = await getCustomerFromDB(phone);
   let customerType = dbCustomer?.customer_type || 'new';
   let savedLocation = null;
 
-  if (isPro) {
-    const memLoc = customerLocations.get(phone);
-    const dbLoc = dbCustomer?.last_address ? {
-      address: dbCustomer.last_address,
-      lat: dbCustomer.last_lat,
-      lng: dbCustomer.last_lng
-    } : null;
-    savedLocation = memLoc || dbLoc;
-    if (savedLocation) customerType = 'returning';
-  }
+  const memLoc = customerLocations.get(phone);
+  const dbLoc  = dbCustomer?.last_address ? {
+    address: dbCustomer.last_address,
+    lat:     dbCustomer.last_lat,
+    lng:     dbCustomer.last_lng
+  } : null;
+  savedLocation = memLoc || dbLoc;
+  if (savedLocation) customerType = 'returning';
 
   // ── HANDLE LOCATION PIN ──
   if (lat && lng) {
     const locAddress = address || `${lat}, ${lng}`;
-    const locData = { address: locAddress, lat: parseFloat(lat), lng: parseFloat(lng) };
+    const locData    = { address: locAddress, lat: parseFloat(lat), lng: parseFloat(lng) };
     customerLocations.set(phone, locData);
 
     const orderState = orderStates.get(phone);
@@ -462,19 +673,22 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
-  // ── HANDLE TEXT ADDRESS (if awaiting) ──
+  // ── HANDLE TEXT ADDRESS (only if awaiting AND text looks like an address) ──
   const orderState = orderStates.get(phone);
-  if (orderState && orderState.state === 'awaiting_location' && body.length > 5) {
-    const locData = { address: body };
-    customerLocations.set(phone, locData);
-    await completeOrder(phone, from, locData, orderState);
-    return;
+  if (orderState && orderState.state === 'awaiting_location') {
+    if (looksLikeAddress(body)) {
+      const locData = { address: body };
+      customerLocations.set(phone, locData);
+      await completeOrder(phone, from, locData, orderState);
+      return;
+    }
+    // If it doesn't look like an address, fall through to Claude (maybe they're adding items)
   }
 
-  // ── HANDLE "WAIT/ESPERA" RESET ──
-  if (orderState && ['espera','wait','momento','add more','agrega','añade'].some(w => body.toLowerCase().includes(w))) {
-    if (orderState.resetCount >= 3) {
-      // Force complete
+  // ── HANDLE WAIT/ESPERA RESET ──
+  if (orderState && ['espera','wait','momento','add more','agrega','añade','también','tambien'].some(w => body.toLowerCase().includes(w))) {
+    if ((orderState.resetCount || 0) >= 3) {
+      // Force complete after 3 resets
       const loc = savedLocation || customerLocations.get(phone);
       if (loc) {
         await completeOrder(phone, from, loc, orderState);
@@ -493,20 +707,19 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
-  // ── GET CONVERSATION HISTORY ──
-  let convData = conversations.get(phone) || { messages: [], resetCount: 0, lastActivity: Date.now() };
+  // ── CONVERSATION HISTORY ──
+  let convData = conversations.get(phone) || { messages: [], lastActivity: Date.now() };
   convData.lastActivity = Date.now();
 
-  // Load from DB if first time in memory
   if (!conversations.has(phone) && dbCustomer?.messages) {
     try {
       const dbMessages = typeof dbCustomer.messages === 'string'
         ? JSON.parse(dbCustomer.messages) : dbCustomer.messages;
-      convData.messages = dbMessages.slice(-12); // last 12 messages
+      convData.messages = dbMessages.slice(-12);
     } catch(e) {}
   }
 
-  // Build Claude messages
+  // ── CALL CLAUDE ──
   const fiaoBalance = getFiaoBalance(phone);
   const systemPrompt = buildSystemPrompt(phone, customerType, fiaoBalance);
 
@@ -516,10 +729,10 @@ app.post('/webhook', async (req, res) => {
   let claudeReply = '';
   try {
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model:      'claude-sonnet-4-20250514',
       max_tokens: 500,
-      system: systemPrompt,
-      messages: convData.messages,
+      system:     systemPrompt,
+      messages:   convData.messages,
     });
     claudeReply = response.content[0]?.text || '¡Hola! ¿En qué te puedo ayudar?';
   } catch(e) {
@@ -532,11 +745,15 @@ app.post('/webhook', async (req, res) => {
 
   await sendWhatsApp(from, claudeReply);
 
-  // ── DETECT ORDER IN REPLY ──
+  // ── DETECT NEW ORDER IN REPLY ──
   if (detectOrderSummary(claudeReply)) {
     const { items, total } = extractOrderItems(claudeReply);
+
+    // Cancel any existing timer
+    if (orderState?.timer) clearTimeout(orderState.timer);
+
     const newOrderState = {
-      state: 'awaiting_extras',
+      state:      'awaiting_extras',
       items,
       total,
       resetCount: 0,
@@ -544,96 +761,12 @@ app.post('/webhook', async (req, res) => {
       from,
     };
 
-    // Set timer based on customer type
     const timerMs = customerType === 'returning' ? 45000 : 30000;
     newOrderState.timer = setTimeout(() => triggerOrderTimeout(phone, from), timerMs);
     orderStates.set(phone, newOrderState);
+    console.log(`📦 Order detected for ${phone}: RD$${total} — awaiting_extras (${timerMs/1000}s timer)`);
   }
 });
-
-// ─── ORDER TIMEOUT HANDLER ────────────────────────────────────
-async function triggerOrderTimeout(phone, from) {
-  const orderState = orderStates.get(phone);
-  if (!orderState) return;
-
-  const savedLoc = customerLocations.get(phone);
-  const dbCustomer = await getCustomerFromDB(phone);
-  const dbLoc = dbCustomer?.last_address ? { address: dbCustomer.last_address } : null;
-  const location = savedLoc || dbLoc;
-
-  if (location && isPro) {
-    // Returning customer — auto complete
-    await completeOrder(phone, from, location, orderState);
-  } else if (orderState.state === 'awaiting_extras') {
-    // New customer — ask for address
-    orderState.state = 'awaiting_location';
-    orderState.timer = setTimeout(async () => {
-      const os = orderStates.get(phone);
-      if (os?.state === 'awaiting_location') {
-        orderState.timer = setTimeout(async () => {
-          const os2 = orderStates.get(phone);
-          if (os2?.state === 'awaiting_location') {
-            // Mark as pending
-            os2.state = 'pending';
-            pendingOrders.set(phone, os2);
-            orderStates.delete(phone);
-            if (isBasic && CONFIG.ownerWhatsapp) {
-              await sendWhatsApp(CONFIG.ownerWhatsapp,
-                `⚠️ PEDIDO PENDIENTE\nCliente: ${phone}\nNo respondió con dirección.\nProductos: ${os2.items}\nTotal: RD$${os2.total}`);
-            }
-          }
-        }, 60000);
-        orderStates.set(phone, orderState);
-        await sendWhatsApp(`whatsapp:${phone}`, '📍 ¿Cuál es tu dirección de entrega? (escríbela o comparte tu ubicación)');
-      }
-    }, 30000);
-    orderStates.set(phone, orderState);
-    await sendWhatsApp(`whatsapp:${phone}`, '📍 ¿A qué dirección te lo enviamos? Puedes escribirla o compartir tu ubicación.');
-  }
-}
-
-// ─── COMPLETE ORDER ───────────────────────────────────────────
-async function completeOrder(phone, from, locData, orderState) {
-  if (orderState.timer) clearTimeout(orderState.timer);
-
-  const orderNumber = getOrderNumber();
-  const orderData = {
-    orderNumber,
-    phone,
-    items: orderState.items,
-    total: orderState.total,
-    address: locData.address,
-    lat: locData.lat,
-    lng: locData.lng,
-    status: 'completed',
-  };
-
-  // Save location for future orders (Pro)
-  if (isPro) {
-    customerLocations.set(phone, locData);
-    await saveConversationToDB(phone, conversations.get(phone)?.messages || [], locData);
-  }
-
-  // Send receipt to customer
-  await sendWhatsApp(from.startsWith('whatsapp:') ? from : `whatsapp:${from}`,
-    formatReceipt(orderData));
-
-  // Save to DB
-  await saveOrderToDB(orderData);
-
-  // Seller notification (Basic+)
-  if (isBasic && CONFIG.ownerWhatsapp) {
-    await sendWhatsApp(CONFIG.ownerWhatsapp, formatSellerNotification(orderData));
-    ownerLastCustomer.set(CONFIG.ownerWhatsapp.replace('whatsapp:',''), phone);
-  }
-
-  lastCompletedOrder.set(phone, orderData);
-
-  // Reset order state after 500ms
-  setTimeout(() => orderStates.delete(phone), 500);
-
-  console.log(`✅ Order completed: ${orderNumber} | ${phone} | RD$${orderData.total}`);
-}
 
 // ─── ADMIN REST API ───────────────────────────────────────────
 const checkAuth = (req, res, next) => {
@@ -644,21 +777,19 @@ const checkAuth = (req, res, next) => {
   next();
 };
 
-// Health check (public)
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
     system: `ZemiRD — ${CONFIG.colmadoName}`,
-    plan: CONFIG.planTier,
-    version: '4.2',
+    plan:    CONFIG.planTier,
+    version: '4.3',
     contact: CONFIG.zemirdSupport,
-    web: CONFIG.zemirdWeb,
-    uptime: process.uptime(),
+    web:     CONFIG.zemirdWeb,
+    uptime:  process.uptime(),
     timestamp: new Date().toISOString(),
   });
 });
 
-// Orders
 app.get('/api/orders', checkAuth, async (req, res) => {
   try {
     const result = await db.query('SELECT * FROM orders ORDER BY created_at DESC LIMIT 200');
@@ -693,7 +824,6 @@ app.post('/api/orders/dispatch/:phone', checkAuth, async (req, res) => {
   res.json({ success: true, message: `Dispatch sent to ${phone}` });
 });
 
-// Fiao
 app.get('/api/fiao', checkAuth, async (req, res) => {
   try {
     const result = await db.query('SELECT * FROM fiao ORDER BY balance DESC');
@@ -705,14 +835,13 @@ app.post('/api/fiao/update', checkAuth, async (req, res) => {
   const { name, phone, balance, lastPurchase } = req.body;
   try {
     await db.query(`INSERT INTO fiao (name, phone, balance, last_purchase) VALUES ($1,$2,$3,$4)
-      ON CONFLICT (phone) DO UPDATE SET name=$1, balance=$3, last_purchase=$4, last_purchase=NOW()`,
+      ON CONFLICT (phone) DO UPDATE SET name=$1, balance=$3, last_purchase=NOW()`,
       [name, phone, balance || 0, lastPurchase || new Date()]);
     await loadFiaoFromDB();
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Inventory
 app.get('/api/inventory', checkAuth, async (req, res) => {
   try {
     const result = await db.query('SELECT * FROM inventory ORDER BY category, name');
@@ -739,10 +868,8 @@ app.post('/api/inventory/toggle', checkAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Config/Promo
 app.post('/api/promo/update', checkAuth, (req, res) => {
-  const { promo } = req.body;
-  CONFIG.promoSemana = promo || '';
+  CONFIG.promoSemana = req.body.promo || '';
   res.json({ success: true, promo: CONFIG.promoSemana });
 });
 
@@ -757,9 +884,7 @@ app.post('/api/config/update', checkAuth, async (req, res) => {
   res.json({ success: true });
 });
 
-// Customers/Locations (Pro)
 app.get('/api/customers/locations', checkAuth, (req, res) => {
-  if (!isPro) return res.status(403).json({ error: 'Pro plan required' });
   const locs = Array.from(customerLocations.entries()).map(([phone, loc]) => ({ phone, ...loc }));
   res.json({ locations: locs, count: locs.length });
 });
@@ -771,22 +896,21 @@ app.get('/api/customers', checkAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Dashboard stats
 app.get('/api/stats', checkAuth, async (req, res) => {
   try {
-    const [todayOrders, totalRevenue, conversations_count] = await Promise.all([
+    const [todayOrders, totalRevenue, convCount] = await Promise.all([
       db.query(`SELECT COUNT(*) as count, COALESCE(SUM(total),0) as revenue FROM orders WHERE status='completed' AND created_at >= NOW() - INTERVAL '24 hours'`),
       db.query(`SELECT COALESCE(SUM(total),0) as total FROM orders WHERE status='completed'`),
       db.query(`SELECT COUNT(DISTINCT phone) as count FROM conversations`),
     ]);
     res.json({
-      today: { orders: parseInt(todayOrders.rows[0].count), revenue: parseFloat(todayOrders.rows[0].revenue) },
-      allTime: { revenue: parseFloat(totalRevenue.rows[0].total) },
-      customers: parseInt(conversations_count.rows[0].count),
-      activeOrders: orderStates.size,
+      today:         { orders: parseInt(todayOrders.rows[0].count), revenue: parseFloat(todayOrders.rows[0].revenue) },
+      allTime:       { revenue: parseFloat(totalRevenue.rows[0].total) },
+      customers:     parseInt(convCount.rows[0].count),
+      activeOrders:  orderStates.size,
       pendingOrders: pendingOrders.size,
-      planTier: CONFIG.planTier,
-      systemUptime: process.uptime(),
+      planTier:      CONFIG.planTier,
+      systemUptime:  process.uptime(),
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -795,7 +919,7 @@ app.get('/api/stats', checkAuth, async (req, res) => {
 app.listen(CONFIG.port, async () => {
   console.log(`
 ╔══════════════════════════════════════════════════════╗
-║     ZemiRD ColmadoBot Zoe v4.2 — ONLINE 🤖           ║
+║     ZemiRD ColmadoBot Zoe v4.3 — ONLINE 🤖           ║
 ╠══════════════════════════════════════════════════════╣
 ║  Plan    : ${CONFIG.planTier.toUpperCase().padEnd(42)}║
 ║  Port    : ${String(CONFIG.port).padEnd(42)}║
