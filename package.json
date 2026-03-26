@@ -1,0 +1,1 @@
+{"name":"zemird-colmado-bot","version":"4.2.0","main":"index.js","scripts":{"start":"node index.js"},"dependencies":{"@anthropic-ai/sdk":"^0.20.0","dotenv":"^16.0.0","express":"^4.18.0","twilio":"^4.19.0","pg":"^8.11.0"}}
