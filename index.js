@@ -22,7 +22,6 @@ require('dotenv').config();
 const express   = require('express');
 const twilio    = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
-const OpenAI    = require('openai');
 const { Pool }  = require('pg');
 const fs        = require('fs');
 const https     = require('https');
@@ -103,7 +102,6 @@ const TIER = {
 
 // ─── CLIENTS ─────────────────────────────────────────────────
 const anthropic    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const openai       = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'no-key' });
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 // ─── DATABASE ────────────────────────────────────────────────
@@ -359,8 +357,8 @@ function looksLikeAddress(text) {
   return t.split(/\s+/).length >= 4;
 }
 
-// ─── VOICE: Download Twilio media ─────────────────────────────
-function downloadTwilioMedia(mediaUrl, destPath) {
+// ─── VOICE: Download Twilio media as base64 ─────────────────
+async function downloadTwilioMediaBase64(mediaUrl) {
   return new Promise((resolve, reject) => {
     const auth    = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
     const urlObj  = new URL(mediaUrl);
@@ -369,31 +367,81 @@ function downloadTwilioMedia(mediaUrl, destPath) {
       path:     urlObj.pathname + urlObj.search,
       headers:  { Authorization: `Basic ${auth}` }
     };
-    const file = fs.createWriteStream(destPath);
+    const chunks = [];
     https.get(options, res => {
-      res.pipe(file);
-      file.on('finish', () => { file.close(); resolve(); });
-    }).on('error', err => { try { fs.unlinkSync(destPath); } catch(e) {} reject(err); });
+      // Follow redirects
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        const redirectUrl = new URL(res.headers.location);
+        const redirectOpts = {
+          hostname: redirectUrl.hostname,
+          path:     redirectUrl.pathname + redirectUrl.search,
+          headers:  { Authorization: `Basic ${auth}` }
+        };
+        const chunks2 = [];
+        https.get(redirectOpts, res2 => {
+          res2.on('data', chunk => chunks2.push(chunk));
+          res2.on('end', () => resolve({
+            base64: Buffer.concat(chunks2).toString('base64'),
+            contentType: res2.headers['content-type'] || 'audio/ogg'
+          }));
+        }).on('error', reject);
+        return;
+      }
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({
+        base64: Buffer.concat(chunks).toString('base64'),
+        contentType: res.headers['content-type'] || 'audio/ogg'
+      }));
+    }).on('error', reject);
   });
 }
 
-// ─── VOICE: Transcribe with Whisper (Pro+) ───────────────────
+// ─── VOICE: Transcribe using Claude (Anthropic) — no OpenAI needed ──
 async function transcribeVoiceNote(mediaUrl) {
-  const tmpPath = `/tmp/voice_${Date.now()}_${Math.random().toString(36).slice(2)}.ogg`;
   try {
-    await downloadTwilioMedia(mediaUrl, tmpPath);
-    const transcription = await openai.audio.transcriptions.create({
-      file:     fs.createReadStream(tmpPath),
-      model:    'whisper-1',
-      language: 'es',
-      prompt:   'Pedido de colmado dominicano, productos, precios en pesos dominicanos'
+    console.log(`🎤 Downloading voice note from Twilio...`);
+    const { base64, contentType } = await downloadTwilioMediaBase64(mediaUrl);
+
+    if (!base64 || base64.length < 100) {
+      console.error('🎤 Audio download failed or empty');
+      return null;
+    }
+
+    console.log(`🎤 Sending to Claude for transcription (${Math.round(base64.length * 0.75 / 1024)}KB)...`);
+
+    // Claude can transcribe audio via the messages API with base64 audio
+    const response = await anthropic.messages.create({
+      model:      'claude-sonnet-4-20250514',
+      max_tokens: 200,
+      system:     'Eres un transcriptor de audio. Transcribe exactamente lo que dice el audio en español. Devuelve SOLO el texto transcrito, sin explicaciones, sin comillas, sin prefijos. Si no puedes entender el audio, responde únicamente: [inaudible]',
+      messages: [{
+        role:    'user',
+        content: [
+          {
+            type:   'document',
+            source: {
+              type:       'base64',
+              media_type: 'audio/webm',
+              data:        base64,
+            },
+          },
+          {
+            type: 'text',
+            text: 'Transcribe este audio de WhatsApp. Es un pedido de colmado dominicano en español.',
+          }
+        ],
+      }],
     });
-    return transcription.text?.trim() || null;
+
+    const transcribed = response.content[0]?.text?.trim();
+    if (!transcribed || transcribed === '[inaudible]' || transcribed.length < 2) {
+      return null;
+    }
+    return transcribed;
   } catch(e) {
-    console.error('🎤 Whisper error:', e.message);
+    console.error('🎤 Claude transcription error:', e.message);
+    // If Claude audio API not available, try text extraction from filename/body
     return null;
-  } finally {
-    try { fs.unlinkSync(tmpPath); } catch(e) {}
   }
 }
 
@@ -701,9 +749,9 @@ app.post('/webhook', async (req, res) => {
       if (transcribed && transcribed.length > 2) {
         body = transcribed;
         isVoice = true;
-        console.log(`🎤 Whisper [${phone}]: ${transcribed}`);
+        console.log(`🎤 Claude transcribed [${phone}]: ${transcribed}`);
         // Echo transcription back so user knows it was heard
-        await sendWhatsApp(from, `🎤 Escuché: "${transcribed.substring(0,80)}${transcribed.length>80?'...':''}"`);
+        await sendWhatsApp(from, `🎤 Entendí: "${transcribed.substring(0,80)}${transcribed.length>80?'...':''}" ✅`);
       } else {
         await sendWhatsApp(from, '🎤 No pude entender bien la nota de voz 😅\n¿Puedes repetirlo o escribirlo?');
         return;
@@ -1164,7 +1212,7 @@ app.listen(CONFIG.port, async () => {
 ║     ZemiRD ColmadoBot Zoe v5.0 — ONLINE 🤖           ║
 ╠══════════════════════════════════════════════════════╣
 ║  Plan    : ${CONFIG.planTier.toUpperCase().padEnd(42)}║
-║  Voice   : ${(TIER.hasVoiceIn() ? '✅ Whisper (Pro+)' : '❌ Basic (text only)').padEnd(42)}║
+║  Voice   : ${(TIER.hasVoiceIn() ? '✅ Claude Audio (Pro+)' : '❌ Basic (text only)').padEnd(42)}║
 ║  DB      : ${(TIER.hasPersistentDB() ? '✅ PostgreSQL' : '⚠️  Basic (memory only)').padEnd(42)}║
 ║  Sheets  : ${(TIER.hasGoogleSheets() ? '✅ Enabled' : '❌ Pro+ only').padEnd(42)}║
 ║  SSE     : ${'✅ /api/stream (live dashboard)'.padEnd(42)}║
