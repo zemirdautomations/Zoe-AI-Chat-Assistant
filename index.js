@@ -1,17 +1,19 @@
 /**
  * ╔══════════════════════════════════════════════════════════╗
- * ║     ZemiRD Automations — Zoe AI Colmado Bot v4.4         ║
+ * ║     ZemiRD Automations — Zoe AI Colmado Bot v4.5         ║
  * ║     Built for the Dominican Republic Market              ║
  * ║     support@zemirdautomations.com                        ║
  * ╚══════════════════════════════════════════════════════════╝
  *
- * v4.4 Fixes:
- * - Voice messages via Twilio native transcription (no OGG issues)
- * - Persistent order counter saved to DB (no more ZRD-1001 every restart)
- * - Goodbye/thanks detection closes order flow cleanly
- * - Seller notification guaranteed on every completed order
- * - ENVIADO dispatch works reliably
- * - Address detection improved further
+ * v4.5 Changes:
+ * - Timezone fixed to America/Santo_Domingo (UTC-4)
+ * - Zoe personality: more human, funny, warm, lots of emojis
+ * - Removed robotic "OK" acknowledgments
+ * - Closed hours: empathetic response + next-day follow-up promise
+ * - Voice: uses Twilio Speech Recognition (set webhook to /webhook?transcribe=1)
+ * - Persistent order counter
+ * - Seller notification guaranteed
+ * - Goodbye detection closes order cleanly
  */
 
 require('dotenv').config();
@@ -53,6 +55,7 @@ const CONFIG = {
   googleSheetsId: process.env.GOOGLE_SHEETS_ID || '',
   googleSheetsKey:process.env.GOOGLE_SHEETS_API_KEY || '',
   dashboardPass:  process.env.DASHBOARD_PASSWORD || 'zoe2024',
+  timezone:       'America/Santo_Domingo',
   zemirdSupport:  'support@zemirdautomations.com',
   zemirdSales:    'sales@zemirdautomations.com',
   zemirdWeb:      'zemirdautomations.com',
@@ -118,6 +121,8 @@ async function initDB() {
         category VARCHAR(100),
         emoji VARCHAR(10) DEFAULT '📦',
         sales_type VARCHAR(30) DEFAULT 'unit',
+        quantity_on_hand INTEGER DEFAULT 0,
+        image_url TEXT,
         created_at TIMESTAMP DEFAULT NOW()
       );
       CREATE TABLE IF NOT EXISTS config_store (
@@ -145,14 +150,19 @@ async function initDB() {
       );
     `);
 
-    // Add missing columns if upgrading from older version
-    await db.query(`
-      ALTER TABLE fiao ADD COLUMN IF NOT EXISTS last_credit DECIMAL(10,2) DEFAULT 0;
-      ALTER TABLE fiao ADD COLUMN IF NOT EXISTS last_payment DECIMAL(10,2) DEFAULT 0;
-      ALTER TABLE fiao ADD COLUMN IF NOT EXISTS last_credit_at TIMESTAMP;
-      ALTER TABLE fiao ADD COLUMN IF NOT EXISTS last_payment_at TIMESTAMP;
-      ALTER TABLE inventory ADD COLUMN IF NOT EXISTS sales_type VARCHAR(30) DEFAULT 'unit';
-    `).catch(() => {}); // ignore if already exist
+    // Safe column additions for upgrades
+    const alterations = [
+      `ALTER TABLE fiao ADD COLUMN IF NOT EXISTS last_credit DECIMAL(10,2) DEFAULT 0`,
+      `ALTER TABLE fiao ADD COLUMN IF NOT EXISTS last_payment DECIMAL(10,2) DEFAULT 0`,
+      `ALTER TABLE fiao ADD COLUMN IF NOT EXISTS last_credit_at TIMESTAMP`,
+      `ALTER TABLE fiao ADD COLUMN IF NOT EXISTS last_payment_at TIMESTAMP`,
+      `ALTER TABLE inventory ADD COLUMN IF NOT EXISTS sales_type VARCHAR(30) DEFAULT 'unit'`,
+      `ALTER TABLE inventory ADD COLUMN IF NOT EXISTS quantity_on_hand INTEGER DEFAULT 0`,
+      `ALTER TABLE inventory ADD COLUMN IF NOT EXISTS image_url TEXT`,
+    ];
+    for (const sql of alterations) {
+      await db.query(sql).catch(() => {});
+    }
 
     // Load persistent order counter
     const counterRes = await db.query(`SELECT value FROM config_store WHERE key='order_counter'`);
@@ -202,7 +212,7 @@ async function syncGoogleSheets() {
     const baseUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.googleSheetsId}/values`;
     const key = `?key=${CONFIG.googleSheetsKey}`;
     const [invRes, fiaoRes, cfgRes] = await Promise.all([
-      fetch(`${baseUrl}/Inventario!A2:E200${key}`),
+      fetch(`${baseUrl}/Inventario!A2:F200${key}`),
       fetch(`${baseUrl}/Fiao!A2:D200${key}`),
       fetch(`${baseUrl}/Config!A1:B20${key}`)
     ]);
@@ -212,14 +222,15 @@ async function syncGoogleSheets() {
         name: r[0], price: parseFloat(r[1]) || 0,
         available: (r[2]||'si').toLowerCase() === 'si',
         category: r[3] || 'General',
-        sales_type: r[4] || 'unit'
+        sales_type: r[4] || 'unit',
+        emoji: r[5] || '📦'
       })).filter(p => p.available);
     }
     if (fiaoRes.ok) {
       const data = await fiaoRes.json();
       fiaoCuentas = (data.values || []).map(r => ({
         name: r[0], phone: r[1],
-        balance: parseFloat(r[2]) || 0, lastPurchase: r[3]
+        balance: parseFloat(r[2]) || 0
       }));
     }
     if (cfgRes.ok) {
@@ -230,6 +241,34 @@ async function syncGoogleSheets() {
   } catch(e) {
     console.error('⚠️ Sheets sync error:', e.message);
   }
+}
+
+// ─── TIME HELPERS (Santo Domingo timezone) ───────────────────
+function getNowInDR() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: CONFIG.timezone }));
+}
+
+function isHoursOpen() {
+  const hours = CONFIG.colmadoHours;
+  const now   = getNowInDR();
+  const hour  = now.getHours();
+  const match = hours.match(/(\d+)(am|pm).*?(\d+)(am|pm)/i);
+  if (!match) return true;
+  let open  = parseInt(match[1]);
+  let close = parseInt(match[3]);
+  if (match[2].toLowerCase() === 'pm' && open  !== 12) open  += 12;
+  if (match[4].toLowerCase() === 'pm' && close !== 12) close += 12;
+  return hour >= open && hour < close;
+}
+
+function getDRTimeString() {
+  const now = getNowInDR();
+  return now.toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: CONFIG.timezone });
+}
+
+function getDRDateString() {
+  const now = getNowInDR();
+  return now.toLocaleDateString('es-DO', { weekday: 'long', day: 'numeric', month: 'long', timeZone: CONFIG.timezone });
 }
 
 // ─── HELPERS ─────────────────────────────────────────────────
@@ -260,73 +299,46 @@ async function getNextOrderNumber() {
   return `ZRD-${orderCounter}`;
 }
 
-function isHoursOpen() {
-  const hours = CONFIG.colmadoHours;
-  const now   = new Date();
-  const hour  = now.getHours();
-  const match = hours.match(/(\d+)(am|pm).*?(\d+)(am|pm)/i);
-  if (!match) return true;
-  let open  = parseInt(match[1]);
-  let close = parseInt(match[3]);
-  if (match[2].toLowerCase() === 'pm' && open  !== 12) open  += 12;
-  if (match[4].toLowerCase() === 'pm' && close !== 12) close += 12;
-  return hour >= open && hour < close;
-}
-
-/**
- * Detects goodbye/thank you messages that should close the order flow
- */
 function isGoodbye(text) {
   const t = text.toLowerCase().trim();
-  const goodbyes = [
-    /^(gracias|thank|thanks|ok gracias|ok thanks|ty|thx)$/,
+  return [
+    /^(gracias|thank|thanks|ty|thx)$/,
     /^(adiós|adios|hasta luego|bye|chao|chau|ciao)$/,
     /^(eso es todo|that'?s? all|nothing else|nada más|nada mas)$/,
-    /^(perfecto gracias|ok ok|listo gracias|ya gracias)$/,
-  ];
-  return goodbyes.some(r => r.test(t));
+    /^(ok gracias|ok thanks|listo gracias|ya gracias|perfecto gracias)$/,
+  ].some(r => r.test(t));
 }
 
-/**
- * Detects if a string looks like a real delivery address.
- */
 function looksLikeAddress(text) {
   if (!text || text.length < 5) return false;
   const t = text.toLowerCase().trim();
-
   const rejects = [
     /^(hola|ok|okay|sí|si|no|gracias|buenas|tarde|mañana|noche|día|eso es todo|nada más)/,
     /^(y |dame|quiero|mándame|agrega|también|más|otro|otra)/,
-    /^(espera|wait|momento|un momento)/,
+    /^(espera|wait|momento)/,
     /^(enviado|pagado|listo|perfecto|excelente)/,
     /^(gracias|thank|thanks|bye|adiós|chao)/,
-    /litro|libra|unidad|caja|bolsa|jugo|leche|agua|cerveza|refresco|pollo|carne|arroz|pan|huevo/,
+    /litro|libra|unidad|caja|bolsa|jugo|leche|agua|cerveza|refresco|pollo|carne|arroz|pan|huevo|guineo|platano/,
     /RD\$|\d+\s*(peso|libra|litro)/i,
   ];
   if (rejects.some(r => r.test(t))) return false;
-
   const accepts = [
     /calle|ave\b|avenida|blvd|boulevard|carretera|autopista/i,
     /\#\s*\d+|\d+\s*[a-z]?\s*,/,
     /sector|residencial|urb|urbanización|barrio|edificio|apt|apto|piso|torre/i,
     /esquina|entre|frente|detrás|detras|cerca|al lado/i,
     /santo domingo|santiago|la romana|punta cana|higuey|moca|barahona/i,
-    /piantini|naco|evaristo|gazcue|bella vista|arroyo hondo|los prados|ensanche/i,
-    /dumas|tropical|ozama|miramar|fernández|fernandez/i,
+    /piantini|naco|evaristo|gazcue|bella vista|arroyo hondo|los prados|ensanche|dumas|ozama|miramar/i,
   ];
   if (accepts.some(r => r.test(t))) return true;
-
-  const wordCount = t.split(/\s+/).length;
-  if (wordCount >= 4) return true;
-
-  return false;
+  return t.split(/\s+/).length >= 4;
 }
 
 async function sendWhatsApp(to, body) {
   try {
     const toNum = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
     await twilioClient.messages.create({ from: CONFIG.twilioNumber, to: toNum, body });
-    console.log(`📤 Sent to ${toNum}: ${body.substring(0,60)}...`);
+    console.log(`📤 Sent to ${toNum.substring(0,20)}: ${body.substring(0,50)}...`);
   } catch (e) {
     console.error('❌ WhatsApp send error:', e.message);
   }
@@ -334,9 +346,9 @@ async function sendWhatsApp(to, body) {
 
 // ─── FORMATTERS ──────────────────────────────────────────────
 function formatReceipt(orderData) {
-  const now     = new Date();
-  const dateStr = now.toLocaleDateString('es-DO');
-  const timeStr = now.toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit' });
+  const now     = getNowInDR();
+  const dateStr = now.toLocaleDateString('es-DO', { timeZone: CONFIG.timezone });
+  const timeStr = now.toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit', timeZone: CONFIG.timezone });
   return `🧾 RECIBO DE PEDIDO
 ━━━━━━━━━━━━━━━━━━━━
 🏪 ${CONFIG.colmadoName}
@@ -358,10 +370,13 @@ ${orderData.items}
 }
 
 function formatSellerNotification(orderData) {
+  const now     = getNowInDR();
+  const timeStr = now.toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit', timeZone: CONFIG.timezone });
   return `🛒 NUEVO PEDIDO — ${CONFIG.colmadoName}
 ━━━━━━━━━━━━━━━━━━━━
 🔖 Pedido #: ${orderData.orderNumber}
-👤 Cliente: ${orderData.phone}
+⏰ ${timeStr}
+👤 Cliente: +${orderData.phone}
 ━━━━━━━━━━━━━━━━━━━━
 📦 DETALLE:
 ${orderData.items}
@@ -369,23 +384,23 @@ ${orderData.items}
 💰 TOTAL: RD$${orderData.total}
 📬 Dirección: ${orderData.address}
 ━━━━━━━━━━━━━━━━━━━━
-✅ Para confirmar envío responde:
+✅ Cuando salga el pedido responde:
 ENVIADO
 (o: ENVIADO +1809XXXXXXX para otro cliente)`;
 }
 
 function formatDispatchNotification(orderData) {
-  return `🛵 ¡Tu pedido está en camino!
+  return `🛵 ¡Tu pedido está en camino! 🎉
 ━━━━━━━━━━━━━━━━━━━━
 🔖 Pedido #: ${orderData.orderNumber}
-📦 Tu pedido:
+📦 Lo que viene:
 ${orderData.items}
 ━━━━━━━━━━━━━━━━━━━━
 💰 Total: RD$${orderData.total}
-⏱️ Tiempo estimado: ${CONFIG.deliveryTime}
+⏱️ Llega en: ${CONFIG.deliveryTime}
 📬 Dirección: ${orderData.address}
 ━━━━━━━━━━━━━━━━━━━━
-¡Gracias por preferirnos! 🙏`;
+¡Gracias por preferirnos! 🙏😊`;
 }
 
 function detectOrderSummary(text) {
@@ -444,6 +459,8 @@ async function getCustomerFromDB(phone) {
 // ─── SYSTEM PROMPT ───────────────────────────────────────────
 function buildSystemPrompt(phone, customerType, fiaoBalance) {
   const open      = isHoursOpen();
+  const drTime    = getDRTimeString();
+  const drDate    = getDRDateString();
   const inventory = getInventoryText();
   const promoText = CONFIG.promoSemana ? `\n🎉 PROMOCIÓN ESTA SEMANA: ${CONFIG.promoSemana}` : '';
   const fiaoText  = fiaoBalance !== null
@@ -451,46 +468,72 @@ function buildSystemPrompt(phone, customerType, fiaoBalance) {
     : '\n💳 FIADO: Sin cuenta registrada';
   const locationInfo = customerType === 'returning'
     ? `\n📍 CLIENTE RECURRENTE: Tiene dirección guardada. NO pedir dirección.`
-    : `\n📍 CLIENTE NUEVO: No pedir dirección — el sistema lo maneja.`;
+    : `\n📍 CLIENTE NUEVO: NO pedir dirección — el sistema lo maneja automáticamente.`;
 
-  return `Eres Zoe, el asistente WhatsApp de ${CONFIG.colmadoName} en ${CONFIG.colmadoBarrio}, República Dominicana.
-Creado por ZemiRD Automations (${CONFIG.zemirdWeb}).
+  const closedInstructions = !open ? `
+⚠️ ESTAMOS CERRADOS AHORA (son las ${drTime}).
+Cuando el cliente pida algo cerrado:
+- Reconoce su pedido con entusiasmo
+- Explica amablemente que están cerrados
+- Promete: "Mañana cuando abramos te confirmo si aún necesitas que te enviemos eso 😊"
+- NO generes TOTAL ni actives el flujo de pedido cuando estamos cerrados
+- Anota el pedido en tu respuesta pero sin formato de recibo
+` : '';
 
-PERSONALIDAD:
-- Amigable, rápido, dominicano. Habla como un vecino de confianza.
-- Usa: "¡Claro que sí!", "¡Tá bien!", "¿Qué más?", "¡Con mucho gusto!"
-- MÁXIMO 4 líneas por respuesta. Esto es WhatsApp.
-- Auto-detecta idioma. Responde en español o inglés según el cliente.
-- Si recibes un mensaje de voz transcrito, respóndelo normalmente.
-- Horario: ${open ? '✅ ABIERTOS AHORA' : '❌ CERRADO — ' + CONFIG.colmadoHours}
-${!open ? '⚠️ Explica amablemente que están cerrados pero anota el pedido para cuando abran.' : ''}
+  return `Eres Zoe 🤖✨, la asistente virtual más chévere del ${CONFIG.colmadoName} en ${CONFIG.colmadoBarrio}, República Dominicana.
+Creada con mucho amor por ZemiRD Automations (${CONFIG.zemirdWeb}).
 
-FORMATO DE PEDIDO (CRÍTICO):
+🕐 HORA ACTUAL EN RD: ${drTime} — ${drDate}
+📅 ESTADO: ${open ? '✅ ABIERTOS Y LISTOS PARA SERVIRTE' : `❌ CERRADOS (Horario: ${CONFIG.colmadoHours})`}
+${closedInstructions}
+
+🎭 PERSONALIDAD — MUY IMPORTANTE:
+- Eres dominicana, cálida, graciosa y carismática. Como la vecina más cool del barrio. 🏘️
+- Hablas con mucho sabor dominicano: "¡Ta' bien!", "¡Claro que sí, mi amor!", "¡Ay, qué rico!", "¡Tamo' con eso!"
+- Usas emojis generosamente pero con estilo 😄🛵🎉🔥💚
+- Eres rápida, eficiente y nunca dejas al cliente esperando mucho
+- Tienes sentido del humor — si el cliente dice algo gracioso, ríete con él 😂
+- NUNCA respondas con "OK" seco. Eso es aburrido. Siempre agrega personalidad.
+- NUNCA digas "Entendido" como primera palabra. Suena robótico.
+- Saluda diferente cada vez: "¡Hola!", "¡Buenas!", "¡Qué hay!", "¡Bienvenido!"
+- Auto-detecta idioma: si hablan inglés, responde en inglés con el mismo sabor
+
+🌟 EJEMPLOS DE RESPUESTAS CON PERSONALIDAD:
+- En vez de "OK": "¡Tamo' con eso! 🔥"
+- En vez de "Entendido": "¡Anotado! Ya lo estoy procesando 📝"
+- En vez de "¿Algo más?": "¿Y qué más le pongo, que la cocina está encendida? 🔥😄"
+- Cuando completan el pedido: "¡Perfecto! Tu pedido ya está volando 🛵💨"
+
+📦 FORMATO DE PEDIDO (CRÍTICO — EXACTAMENTE ASÍ):
 • [Producto] x[cantidad] = RD$[subtotal]
 • [Producto] x[cantidad] = RD$[subtotal]
 TOTAL: RD$[total]
-¿Algo más? 🛵
+¿Y qué más? 🛵
 
-NUNCA incluyas texto antes de los bullets en un pedido.
-NUNCA preguntes por dirección — el sistema lo maneja.
-NUNCA digas "en camino" o "ya va saliendo" — eso lo confirma el dueño.
+REGLAS DE PEDIDO:
+- NUNCA incluyas texto conversacional ANTES de los bullets
+- NUNCA preguntes por dirección — el sistema lo maneja mágicamente 🪄
+- NUNCA digas "en camino" o "ya salió" — eso lo confirma el dueño
+- Si ESTAMOS CERRADOS: NO generes TOTAL: RD$ — solo anota el pedido sin formato de recibo
+- Máximo 5 líneas de respuesta. WhatsApp no es una novela. 📱
 
-CUANDO EL CLIENTE DICE "gracias", "eso es todo", "nada más", "bye":
-Responde con despedida amistosa. NO hagas nada más.
+🛑 CUANDO EL CLIENTE SE DESPIDE ("gracias", "eso es todo", "bye"):
+Despídete con cariño y humor. NO preguntes por dirección. NO hagas nada más.
+Ejemplo: "¡Hasta luego! Fue un placer servirte 😊🙌 ¡Vuelve pronto!"
 
-RESPUESTAS VALIDADAS:
-1. PEDIDO: bullets → TOTAL: RD$X → ¿Algo más?
-2. FIADO ("¿cuánto le debo?"): balance exacto. Si cero: "Estás al día ✅"
-3. INFO: horas, dirección, zona, mínimo
-4. CONTACTO: toda la info. Termina con "¡Con gusto te atendemos! 😊"
+💳 RESPUESTAS CLAVE:
+1. PEDIDO: bullets → TOTAL: RD$X → pregunta creativa tipo "¿Y qué más?"
+2. FIADO: balance exacto. Si cero: "¡Estás limpio! ✅ No debes nada 🎉"
+3. INFO: horas, dirección, zona, mínimo — con entusiasmo
+4. CONTACTO: toda la info. Termina con "¡Con gusto te atendemos! 😊🙌"
 
-INFO:
-🏪 ${CONFIG.colmadoName} | 📍 ${CONFIG.colmadoAddress}, ${CONFIG.colmadoBarrio}
+🏪 INFO:
+${CONFIG.colmadoName} | ${CONFIG.colmadoAddress}, ${CONFIG.colmadoBarrio}
 📞 ${CONFIG.colmadoPhone} | ⏰ ${CONFIG.colmadoHours}
 🛵 Delivery: ${CONFIG.deliveryTime} | Zona: ${CONFIG.deliveryZone} | Mínimo: ${CONFIG.minDelivery}
 ${promoText}${fiaoText}${locationInfo}
 
-INVENTARIO:
+📋 INVENTARIO DISPONIBLE:
 ${inventory}`;
 }
 
@@ -500,8 +543,7 @@ async function completeOrder(phone, from, locData, orderState) {
 
   const orderNumber = await getNextOrderNumber();
   const orderData   = {
-    orderNumber,
-    phone,
+    orderNumber, phone,
     items:   orderState.items,
     total:   orderState.total,
     address: locData.address,
@@ -510,29 +552,23 @@ async function completeOrder(phone, from, locData, orderState) {
     status:  'completed',
   };
 
-  // Save location
   customerLocations.set(phone, locData);
   await saveConversationToDB(phone, conversations.get(phone)?.messages || [], locData);
-
-  // Send receipt to customer
   await sendWhatsApp(from, formatReceipt(orderData));
-
-  // Save to DB
   await saveOrderToDB(orderData);
 
-  // Seller notification — always fires
+  // Seller notification — ALWAYS fires
   if (CONFIG.ownerWhatsapp) {
     await sendWhatsApp(CONFIG.ownerWhatsapp, formatSellerNotification(orderData));
     const ownerPhone = CONFIG.ownerWhatsapp.replace('whatsapp:','').replace('+','');
     ownerLastCustomer.set(ownerPhone, phone);
-    console.log(`📱 Seller notified: ${CONFIG.ownerWhatsapp} | Order: ${orderNumber}`);
+    console.log(`📱 Seller notified | Order: ${orderNumber}`);
   } else {
-    console.warn('⚠️ OWNER_WHATSAPP not set — seller not notified');
+    console.warn('⚠️ OWNER_WHATSAPP not set — seller not notified!');
   }
 
   lastCompletedOrder.set(phone, orderData);
   setTimeout(() => orderStates.delete(phone), 500);
-
   console.log(`✅ Order completed: ${orderNumber} | ${phone} | RD$${orderData.total}`);
 }
 
@@ -544,28 +580,21 @@ async function triggerOrderTimeout(phone, from) {
   const savedLoc   = customerLocations.get(phone);
   const dbCustomer = await getCustomerFromDB(phone);
   const dbLoc      = dbCustomer?.last_address ? {
-    address: dbCustomer.last_address,
-    lat:     dbCustomer.last_lat,
-    lng:     dbCustomer.last_lng
+    address: dbCustomer.last_address, lat: dbCustomer.last_lat, lng: dbCustomer.last_lng
   } : null;
   const location = savedLoc || dbLoc;
 
   if (location) {
-    // Has saved address — auto complete
     await completeOrder(phone, from, location, orderState);
   } else if (orderState.state === 'awaiting_extras') {
-    // New customer — ask for address
     orderState.state = 'awaiting_location';
     orderStates.set(phone, orderState);
-    await sendWhatsApp(from, '📍 ¿A qué dirección te lo enviamos?\nPuedes escribirla o compartir tu ubicación 📌');
+    await sendWhatsApp(from, '📍 ¿A qué dirección te lo enviamos?\nEscríbela o comparte tu ubicación 📌');
 
-    // Second reminder after 30s
     orderState.timer = setTimeout(async () => {
       const os = orderStates.get(phone);
       if (os?.state === 'awaiting_location') {
-        await sendWhatsApp(from, '📍 ¿Cuál es tu dirección de entrega? (escríbela o comparte tu ubicación)');
-
-        // Final — mark pending after 60s more
+        await sendWhatsApp(from, '📍 Oye, ¿cuál es tu dirección? ¡El delivery está listo para salir! 🛵');
         orderState.timer = setTimeout(async () => {
           const os2 = orderStates.get(phone);
           if (os2?.state === 'awaiting_location') {
@@ -574,7 +603,7 @@ async function triggerOrderTimeout(phone, from) {
             orderStates.delete(phone);
             if (CONFIG.ownerWhatsapp) {
               await sendWhatsApp(CONFIG.ownerWhatsapp,
-                `⚠️ PEDIDO PENDIENTE\nCliente: ${phone}\nNo dio dirección.\nProductos: ${os2.items}\nTotal: RD$${os2.total}`);
+                `⚠️ PEDIDO PENDIENTE — Cliente no respondió con dirección\n👤 ${phone}\n📦 ${os2.items}\n💰 RD$${os2.total}`);
             }
           }
         }, 60000);
@@ -598,47 +627,45 @@ app.post('/webhook', async (req, res) => {
   const numMedia  = parseInt(req.body.NumMedia || '0');
   const mediaType = (req.body.MediaContentType0 || '').toLowerCase();
 
+  // Voice transcription from Twilio's SpeechResult field
+  const speechResult = req.body.SpeechResult || '';
+
   if (!from) return;
 
-  // ── VOICE MESSAGE — use Twilio transcription ──
-  // Twilio can auto-transcribe voice notes when configured.
-  // If body contains transcription text from Twilio, use it directly.
-  // If it's a media message with no body, prompt user to type.
+  // ── VOICE MESSAGE HANDLING ──
   if (numMedia > 0 && (mediaType.includes('audio') || mediaType.includes('ogg') || mediaType.includes('mpeg'))) {
-    if (body && body.length > 3) {
-      // Twilio provided a transcription in the Body field
-      console.log(`🎤 Voice transcription: ${body}`);
+    if (speechResult && speechResult.length > 2) {
+      // Twilio transcribed it via SpeechResult
+      body = `[Nota de voz]: ${speechResult}`;
+      console.log(`🎤 Transcription: ${speechResult}`);
+    } else if (body && body.length > 3) {
+      // Sometimes Twilio puts transcription in Body
       body = `[Nota de voz]: ${body}`;
     } else {
-      // No transcription available — ask to type
-      await sendWhatsApp(from, `🎤 Recibí tu nota de voz pero no pude transcribirla.\n¿Puedes escribir tu pedido? 😊`);
+      await sendWhatsApp(from, `🎤 ¡Escuché tu nota! Pero Zoe todavía está aprendiendo a escuchar 😅\n¿Puedes escribirlo? ¡Prometo que soy más lista leyendo! 😄`);
       return;
     }
   }
 
-  console.log(`📩 [${new Date().toISOString()}] From: ${phone} | Msg: ${body.substring(0,80)}`);
+  console.log(`📩 [${getDRTimeString()}] From: ${phone} | Msg: ${body.substring(0,80)}`);
 
   // ── OWNER ENVIADO COMMAND ──
   const ownerPhone = CONFIG.ownerWhatsapp.replace('whatsapp:','').replace('+','');
   if (body.toUpperCase().startsWith('ENVIADO') && CONFIG.ownerWhatsapp &&
-      (phone === ownerPhone || from === CONFIG.ownerWhatsapp || `+${phone}` === CONFIG.ownerWhatsapp.replace('whatsapp:',''))) {
+      (phone === ownerPhone || `+${phone}` === CONFIG.ownerWhatsapp.replace('whatsapp:', ''))) {
 
     const parts       = body.trim().split(/\s+/);
     const targetRaw   = parts[1];
-    const targetPhone = targetRaw
-      ? (targetRaw.startsWith('+') ? targetRaw.replace('+','') : targetRaw)
-      : null;
-
+    const targetPhone = targetRaw ? targetRaw.replace('+','') : null;
     const customerPhone = targetPhone || ownerLastCustomer.get(ownerPhone);
 
     if (customerPhone) {
       const lastOrder = lastCompletedOrder.get(customerPhone);
       if (lastOrder) {
-        const customerWA = `whatsapp:+${customerPhone.replace('+','')}`;
+        const customerWA = customerPhone.startsWith('whatsapp:') ? customerPhone : `whatsapp:+${customerPhone}`;
         await sendWhatsApp(customerWA, formatDispatchNotification(lastOrder));
         orderStates.delete(customerPhone);
-        await sendWhatsApp(from, `✅ Cliente +${customerPhone} notificado que su pedido #${lastOrder.orderNumber} está en camino.`);
-        console.log(`🛵 Dispatch sent to ${customerPhone}`);
+        await sendWhatsApp(from, `✅ Cliente notificado que su pedido #${lastOrder.orderNumber} está en camino 🛵`);
       } else {
         await sendWhatsApp(from, '⚠️ No encontré pedido reciente para ese cliente.');
       }
@@ -651,41 +678,36 @@ app.post('/webhook', async (req, res) => {
   // ── GET CUSTOMER STATE ──
   let dbCustomer   = await getCustomerFromDB(phone);
   let customerType = dbCustomer?.customer_type || 'new';
-
   const memLoc = customerLocations.get(phone);
   const dbLoc  = dbCustomer?.last_address ? {
-    address: dbCustomer.last_address,
-    lat:     dbCustomer.last_lat,
-    lng:     dbCustomer.last_lng
+    address: dbCustomer.last_address, lat: dbCustomer.last_lat, lng: dbCustomer.last_lng
   } : null;
   const savedLocation = memLoc || dbLoc;
   if (savedLocation) customerType = 'returning';
 
-  // ── HANDLE LOCATION PIN ──
+  // ── LOCATION PIN ──
   if (lat && lng) {
     const locAddress = address || `${lat}, ${lng}`;
     const locData    = { address: locAddress, lat: parseFloat(lat), lng: parseFloat(lng) };
     customerLocations.set(phone, locData);
-
     const orderState = orderStates.get(phone);
     if (orderState && (orderState.state === 'awaiting_location' || orderState.state === 'awaiting_extras')) {
       await completeOrder(phone, from, locData, orderState);
       return;
     }
-    await sendWhatsApp(from, `📍 Dirección guardada: ${locAddress}\n¿En qué más te puedo ayudar?`);
+    await sendWhatsApp(from, `📍 ¡Ubicación guardada! ${locAddress} 👌\n¿En qué más te puedo ayudar?`);
     return;
   }
 
   const orderState = orderStates.get(phone);
 
-  // ── GOODBYE DETECTION — close order flow cleanly ──
+  // ── GOODBYE — close order flow ──
   if (isGoodbye(body)) {
     if (orderState?.timer) clearTimeout(orderState.timer);
     if (orderState) orderStates.delete(phone);
-    // Let Claude give a friendly goodbye — don't trigger order flow
   }
 
-  // ── TEXT ADDRESS (only if awaiting AND looks like address) ──
+  // ── TEXT ADDRESS ──
   if (orderState && orderState.state === 'awaiting_location' && !isGoodbye(body)) {
     if (looksLikeAddress(body)) {
       const locData = { address: body };
@@ -693,10 +715,9 @@ app.post('/webhook', async (req, res) => {
       await completeOrder(phone, from, locData, orderState);
       return;
     }
-    // Doesn't look like address — fall through to Claude
   }
 
-  // ── WAIT/RESET HANDLING ──
+  // ── WAIT/RESET ──
   if (orderState && !isGoodbye(body) &&
       ['espera','wait','momento','add more','agrega','añade','también','tambien','y también','y tambien'].some(w => body.toLowerCase().includes(w))) {
     if ((orderState.resetCount || 0) >= 3) {
@@ -706,22 +727,21 @@ app.post('/webhook', async (req, res) => {
       } else {
         orderState.state = 'awaiting_location';
         orderStates.set(phone, orderState);
-        await sendWhatsApp(from, '📍 ¿A qué dirección te lo enviamos?');
+        await sendWhatsApp(from, '📍 ¿A qué dirección te lo enviamos? 😊');
       }
     } else {
       orderState.resetCount = (orderState.resetCount || 0) + 1;
       if (orderState.timer) clearTimeout(orderState.timer);
       orderState.timer = setTimeout(() => triggerOrderTimeout(phone, from), 45000);
       orderStates.set(phone, orderState);
-      await sendWhatsApp(from, '¡Claro! Tómate tu tiempo. ¿Qué más deseas agregar?');
+      await sendWhatsApp(from, '¡Claro, tómate tu tiempo! ⏰ ¿Qué más le agregamos? 😄');
     }
     return;
   }
 
-  // ── CONVERSATION HISTORY ──
+  // ── CONVERSATION ──
   let convData = conversations.get(phone) || { messages: [], lastActivity: Date.now() };
   convData.lastActivity = Date.now();
-
   if (!conversations.has(phone) && dbCustomer?.messages) {
     try {
       const dbMessages = typeof dbCustomer.messages === 'string'
@@ -730,51 +750,36 @@ app.post('/webhook', async (req, res) => {
     } catch(e) {}
   }
 
-  // ── CALL CLAUDE ──
   const fiaoBalance  = getFiaoBalance(phone);
   const systemPrompt = buildSystemPrompt(phone, customerType, fiaoBalance);
-
   convData.messages.push({ role: 'user', content: body });
   if (convData.messages.length > 16) convData.messages = convData.messages.slice(-16);
 
   let claudeReply = '';
   try {
     const response = await anthropic.messages.create({
-      model:      'claude-sonnet-4-20250514',
-      max_tokens: 500,
-      system:     systemPrompt,
-      messages:   convData.messages,
+      model: 'claude-sonnet-4-20250514', max_tokens: 500,
+      system: systemPrompt, messages: convData.messages,
     });
-    claudeReply = response.content[0]?.text || '¡Hola! ¿En qué te puedo ayudar?';
+    claudeReply = response.content[0]?.text || '¡Hola! ¿En qué te puedo ayudar? 😊';
   } catch(e) {
     console.error('❌ Claude error:', e.message);
-    claudeReply = `Lo siento, hubo un error. Llámanos al ${CONFIG.colmadoPhone}`;
+    claudeReply = `¡Ay, se me fue la luz por un momento! 😅 Llámanos al ${CONFIG.colmadoPhone} que te atendemos ahí mismo.`;
   }
 
   convData.messages.push({ role: 'assistant', content: claudeReply });
   conversations.set(phone, convData);
-
   await sendWhatsApp(from, claudeReply);
 
-  // ── DETECT NEW ORDER ──
-  if (detectOrderSummary(claudeReply) && !isGoodbye(body)) {
+  // ── DETECT ORDER — only when open ──
+  if (detectOrderSummary(claudeReply) && !isGoodbye(body) && isHoursOpen()) {
     const { items, total } = extractOrderItems(claudeReply);
-
     if (orderState?.timer) clearTimeout(orderState.timer);
-
-    const newOrderState = {
-      state:      'awaiting_extras',
-      items,
-      total,
-      resetCount: 0,
-      phone,
-      from,
-    };
-
+    const newOrderState = { state: 'awaiting_extras', items, total, resetCount: 0, phone, from };
     const timerMs = customerType === 'returning' ? 45000 : 30000;
     newOrderState.timer = setTimeout(() => triggerOrderTimeout(phone, from), timerMs);
     orderStates.set(phone, newOrderState);
-    console.log(`📦 Order detected: ${phone} | RD$${total} | Timer: ${timerMs/1000}s`);
+    console.log(`📦 Order detected: ${phone} | RD$${total} | ${timerMs/1000}s timer`);
   }
 });
 
@@ -787,14 +792,12 @@ const checkAuth = (req, res, next) => {
   next();
 };
 
-app.get('/', (req, res) => {
-  res.json({
-    status: 'online', system: `ZemiRD — ${CONFIG.colmadoName}`,
-    plan: CONFIG.planTier, version: '4.4',
-    contact: CONFIG.zemirdSupport, web: CONFIG.zemirdWeb,
-    uptime: process.uptime(), timestamp: new Date().toISOString(),
-  });
-});
+app.get('/', (req, res) => res.json({
+  status: 'online', system: `ZemiRD — ${CONFIG.colmadoName}`,
+  plan: CONFIG.planTier, version: '4.5',
+  drTime: getDRTimeString(), isOpen: isHoursOpen(),
+  contact: CONFIG.zemirdSupport, uptime: process.uptime(),
+}));
 
 app.get('/api/orders', checkAuth, async (req, res) => {
   try {
@@ -826,7 +829,7 @@ app.post('/api/orders/dispatch/:phone', checkAuth, async (req, res) => {
   if (!lastOrder) return res.status(404).json({ error: 'No recent order for this customer' });
   await sendWhatsApp(`whatsapp:+${phone}`, formatDispatchNotification(lastOrder));
   orderStates.delete(phone);
-  res.json({ success: true, message: `Dispatch sent to ${phone}` });
+  res.json({ success: true });
 });
 
 app.get('/api/fiao', checkAuth, async (req, res) => {
@@ -841,20 +844,18 @@ app.post('/api/fiao/update', checkAuth, async (req, res) => {
   try {
     const existing = await db.query('SELECT * FROM fiao WHERE phone=$1', [phone]);
     if (existing.rows.length > 0) {
-      const current = existing.rows[0];
+      const current    = existing.rows[0];
       const newBalance = payment
         ? Math.max(0, parseFloat(current.balance) - parseFloat(payment))
-        : parseFloat(balance) || current.balance;
+        : parseFloat(balance) ?? current.balance;
       await db.query(`UPDATE fiao SET
-        name=COALESCE($1,name),
-        balance=$2,
+        name=COALESCE($1,name), balance=$2,
         last_payment=CASE WHEN $3::numeric > 0 THEN $3::numeric ELSE last_payment END,
         last_payment_at=CASE WHEN $3::numeric > 0 THEN NOW() ELSE last_payment_at END
-        WHERE phone=$4`,
-        [name, newBalance, payment || 0, phone]);
+        WHERE phone=$4`, [name, newBalance, payment||0, phone]);
     } else {
       await db.query(`INSERT INTO fiao (name, phone, balance, last_credit, last_credit_at) VALUES ($1,$2,$3,$3,NOW())`,
-        [name, phone, balance || 0]);
+        [name, phone, balance||0]);
     }
     await loadFiaoFromDB();
     res.json({ success: true });
@@ -864,11 +865,7 @@ app.post('/api/fiao/update', checkAuth, async (req, res) => {
 app.post('/api/fiao/credit', checkAuth, async (req, res) => {
   const { phone, amount } = req.body;
   try {
-    await db.query(`UPDATE fiao SET
-      balance=balance+$1,
-      last_credit=$1,
-      last_credit_at=NOW()
-      WHERE phone=$2`, [amount, phone]);
+    await db.query(`UPDATE fiao SET balance=balance+$1, last_credit=$1, last_credit_at=NOW() WHERE phone=$2`, [amount, phone]);
     await loadFiaoFromDB();
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -882,20 +879,21 @@ app.get('/api/inventory', checkAuth, async (req, res) => {
 });
 
 app.post('/api/inventory/update', checkAuth, async (req, res) => {
-  const { name, price, available, category, emoji, sales_type } = req.body;
+  const { name, price, available, category, emoji, sales_type, quantity_on_hand, image_url } = req.body;
   try {
-    await db.query(`INSERT INTO inventory (name, price, available, category, emoji, sales_type) VALUES ($1,$2,$3,$4,$5,$6)
-      ON CONFLICT DO NOTHING`, [name, price, available !== false, category || 'General', emoji || '📦', sales_type || 'unit']);
+    await db.query(`INSERT INTO inventory (name, price, available, category, emoji, sales_type, quantity_on_hand, image_url)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [name, price, available !== false, category||'General', emoji||'📦', sales_type||'unit', quantity_on_hand||0, image_url||null]);
     await loadInventoryFromDB();
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.put('/api/inventory/:id', checkAuth, async (req, res) => {
-  const { name, price, available, category, emoji, sales_type } = req.body;
+  const { name, price, available, category, emoji, sales_type, quantity_on_hand, image_url } = req.body;
   try {
-    await db.query(`UPDATE inventory SET name=$1,price=$2,available=$3,category=$4,emoji=$5,sales_type=$6 WHERE id=$7`,
-      [name, price, available, category, emoji, sales_type, req.params.id]);
+    await db.query(`UPDATE inventory SET name=$1,price=$2,available=$3,category=$4,emoji=$5,sales_type=$6,quantity_on_hand=$7,image_url=$8 WHERE id=$9`,
+      [name, price, available, category, emoji, sales_type, quantity_on_hand||0, image_url||null, req.params.id]);
     await loadInventoryFromDB();
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -910,15 +908,14 @@ app.delete('/api/inventory/:id', checkAuth, async (req, res) => {
 });
 
 app.post('/api/inventory/toggle', checkAuth, async (req, res) => {
-  const { id, available } = req.body;
   try {
-    await db.query('UPDATE inventory SET available=$1 WHERE id=$2', [available, id]);
+    await db.query('UPDATE inventory SET available=$1 WHERE id=$2', [req.body.available, req.body.id]);
     await loadInventoryFromDB();
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Clients (Master Panel)
+// Clients
 app.get('/api/clients', checkAuth, async (req, res) => {
   try {
     const result = await db.query('SELECT * FROM clients ORDER BY created_at DESC');
@@ -929,7 +926,7 @@ app.get('/api/clients', checkAuth, async (req, res) => {
 app.post('/api/clients', checkAuth, async (req, res) => {
   const { business_name, owner_name, phone, whatsapp, email, barrio, address, plan_tier, dashboard_password, twilio_number, railway_url, notes } = req.body;
   try {
-    await db.query(`INSERT INTO clients (business_name, owner_name, phone, whatsapp, email, barrio, address, plan_tier, dashboard_password, twilio_number, railway_url, notes)
+    await db.query(`INSERT INTO clients (business_name,owner_name,phone,whatsapp,email,barrio,address,plan_tier,dashboard_password,twilio_number,railway_url,notes)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [business_name, owner_name, phone, whatsapp, email, barrio, address, plan_tier||'starter', dashboard_password, twilio_number, railway_url, notes]);
     res.json({ success: true });
@@ -947,29 +944,28 @@ app.put('/api/clients/:id', checkAuth, async (req, res) => {
 
 app.post('/api/clients/:id/suspend', checkAuth, async (req, res) => {
   try {
-    await db.query(`UPDATE clients SET status='suspended', updated_at=NOW() WHERE id=$1`, [req.params.id]);
+    await db.query(`UPDATE clients SET status='suspended',updated_at=NOW() WHERE id=$1`, [req.params.id]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/clients/:id/activate', checkAuth, async (req, res) => {
   try {
-    await db.query(`UPDATE clients SET status='active', updated_at=NOW() WHERE id=$1`, [req.params.id]);
+    await db.query(`UPDATE clients SET status='active',updated_at=NOW() WHERE id=$1`, [req.params.id]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/clients/:id/upgrade', checkAuth, async (req, res) => {
-  const { plan_tier } = req.body;
   try {
-    await db.query(`UPDATE clients SET plan_tier=$1, updated_at=NOW() WHERE id=$2`, [plan_tier, req.params.id]);
+    await db.query(`UPDATE clients SET plan_tier=$1,updated_at=NOW() WHERE id=$2`, [req.body.plan_tier, req.params.id]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/promo/update', checkAuth, (req, res) => {
   CONFIG.promoSemana = req.body.promo || '';
-  res.json({ success: true, promo: CONFIG.promoSemana });
+  res.json({ success: true });
 });
 
 app.get('/api/config', checkAuth, (req, res) => {
@@ -977,7 +973,7 @@ app.get('/api/config', checkAuth, (req, res) => {
   res.json(safeConfig);
 });
 
-app.post('/api/config/update', checkAuth, async (req, res) => {
+app.post('/api/config/update', checkAuth, (req, res) => {
   const allowed = ['colmadoName','colmadoBarrio','colmadoAddress','colmadoPhone','colmadoHours','deliveryTime','deliveryZone','minDelivery','promoSemana'];
   allowed.forEach(k => { if (req.body[k] !== undefined) CONFIG[k] = req.body[k]; });
   res.json({ success: true });
@@ -985,52 +981,49 @@ app.post('/api/config/update', checkAuth, async (req, res) => {
 
 app.get('/api/customers', checkAuth, async (req, res) => {
   try {
-    const result = await db.query('SELECT phone, customer_type, last_address, order_count, updated_at FROM conversations ORDER BY updated_at DESC');
+    const result = await db.query('SELECT phone,customer_type,last_address,order_count,updated_at FROM conversations ORDER BY updated_at DESC');
     res.json({ customers: result.rows, count: result.rowCount });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/customers/locations', checkAuth, (req, res) => {
-  const locs = Array.from(customerLocations.entries()).map(([phone, loc]) => ({ phone, ...loc }));
-  res.json({ locations: locs, count: locs.length });
-});
-
 app.get('/api/stats', checkAuth, async (req, res) => {
   try {
-    const [todayOrders, totalRevenue, convCount] = await Promise.all([
+    const [today, total, convCount] = await Promise.all([
       db.query(`SELECT COUNT(*) as count, COALESCE(SUM(total),0) as revenue FROM orders WHERE status='completed' AND created_at >= NOW() - INTERVAL '24 hours'`),
       db.query(`SELECT COALESCE(SUM(total),0) as total FROM orders WHERE status='completed'`),
       db.query(`SELECT COUNT(DISTINCT phone) as count FROM conversations`),
     ]);
     res.json({
-      today:         { orders: parseInt(todayOrders.rows[0].count), revenue: parseFloat(todayOrders.rows[0].revenue) },
-      allTime:       { revenue: parseFloat(totalRevenue.rows[0].total) },
+      today:         { orders: parseInt(today.rows[0].count), revenue: parseFloat(today.rows[0].revenue) },
+      allTime:       { revenue: parseFloat(total.rows[0].total) },
       customers:     parseInt(convCount.rows[0].count),
       activeOrders:  orderStates.size,
       pendingOrders: pendingOrders.size,
       planTier:      CONFIG.planTier,
       systemUptime:  process.uptime(),
       orderCounter,
+      drTime:        getDRTimeString(),
+      isOpen:        isHoursOpen(),
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── START SERVER ─────────────────────────────────────────────
+// ─── START ────────────────────────────────────────────────────
 app.listen(CONFIG.port, async () => {
   console.log(`
 ╔══════════════════════════════════════════════════════╗
-║     ZemiRD ColmadoBot Zoe v4.4 — ONLINE 🤖           ║
+║     ZemiRD ColmadoBot Zoe v4.5 — ONLINE 🤖           ║
 ╠══════════════════════════════════════════════════════╣
 ║  Plan    : ${CONFIG.planTier.toUpperCase().padEnd(42)}║
 ║  Port    : ${String(CONFIG.port).padEnd(42)}║
 ║  Colmado : ${CONFIG.colmadoName.substring(0,42).padEnd(42)}║
+║  DR Time : ${getDRTimeString().padEnd(42)}║
+║  Open    : ${String(isHoursOpen()).padEnd(42)}║
 ║  Support : support@zemirdautomations.com             ║
 ╚══════════════════════════════════════════════════════╝`);
-
   await initDB();
   await loadInventoryFromDB();
   await loadFiaoFromDB();
-
   if (isPro && CONFIG.googleSheetsId) {
     await syncGoogleSheets();
     setInterval(syncGoogleSheets, 5 * 60 * 1000);
