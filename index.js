@@ -1120,6 +1120,43 @@ app.post('/api/config/update', checkAuth, (req, res) => {
   res.json({ success: true });
 });
 
+
+// ─── DEMO ENDPOINT (for onboarding portal live demo) ─────────
+app.post('/api/demo', async (req, res) => {
+  const { message, history = [] } = req.body;
+  if (!message) return res.status(400).json({ error: 'message required' });
+
+  try {
+    const demoSystemPrompt = `${buildSystemPrompt('demo', 'new', null)}
+
+CONTEXTO ESPECIAL — MODO DEMO:
+Estás siendo demostrado a un posible cliente del colmado.
+Sé especialmente encantador, rápido y muestra todas tus capacidades.
+Si detectas un pedido real, usa el formato TOTAL: RD$XXX como siempre.`;
+
+    const messages = [
+      ...history.slice(-8),
+      { role: 'user', content: message }
+    ];
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 400,
+      system: demoSystemPrompt,
+      messages,
+    });
+
+    const reply = response.content[0]?.text || '¡Hola! ¿En qué te puedo ayudar? 😊';
+    const orderDetected = detectOrderSummary(reply);
+    const { total } = orderDetected ? extractOrderItems(reply) : { total: 0 };
+
+    res.json({ reply, orderDetected, total });
+  } catch(e) {
+    console.error('❌ Demo API error:', e.message);
+    res.status(500).json({ reply: `¡Ay, un problemita técnico! 😅 Llámanos al ${CONFIG.colmadoPhone}`, orderDetected: false });
+  }
+});
+
 // ─── START ────────────────────────────────────────────────────
 app.listen(CONFIG.port, async () => {
   console.log(`
