@@ -1,19 +1,21 @@
 /**
  * ╔══════════════════════════════════════════════════════════╗
- * ║     ZemiRD Automations — Zoe AI Colmado Bot v4.7         ║
+ * ║     ZemiRD Automations — Zoe AI Colmado Bot v5.1         ║
  * ║     Built for the Dominican Republic Market              ║
  * ║     support@zemirdautomations.com                        ║
  * ╚══════════════════════════════════════════════════════════╝
  *
- * v4.5 Changes:
- * - Timezone fixed to America/Santo_Domingo (UTC-4)
- * - Zoe personality: more human, funny, warm, lots of emojis
- * - Removed robotic "OK" acknowledgments
- * - Closed hours: empathetic response + next-day follow-up promise
- * - Voice: uses Twilio Speech Recognition (set webhook to /webhook?transcribe=1)
- * - Persistent order counter
- * - Seller notification guaranteed
- * - Goodbye detection closes order cleanly
+ * v5.0 Changes:
+ * - TIER SYSTEM: Basic / Pro / Premium fully enforced per feature
+ * - VOICE IN: AssemblyAI transcribes WhatsApp voice notes (free tier 100hrs/mo)
+ * - VOICE OUT: TTS reply option for Premium tier
+ * - ADDRESS BUG FIX: Order never completes without confirmed address
+ * - ADDRESS TIMING FIX: Address only requested AFTER order is closed
+ * - "OK" GHOST FIX: Stronger system prompt enforcement
+ * - PROMO VERBOSITY FIX: Promo injected inline, not as separate message
+ * - DASHBOARD SYNC: /api/orders/stream SSE endpoint for live dashboard
+ * - UPGRADE API: customers can self-upgrade tier via dashboard
+ * - Persistent tier stored in DB config_store per instance
  */
 
 require('dotenv').config();
@@ -21,6 +23,9 @@ const express   = require('express');
 const twilio    = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
 const { Pool }  = require('pg');
+const fs        = require('fs');
+const https     = require('https');
+const path      = require('path');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -59,9 +64,41 @@ const CONFIG = {
   zemirdSupport:  'support@zemirdautomations.com',
   zemirdSales:    'sales@zemirdautomations.com',
   zemirdWeb:      'zemirdautomations.com',
+  // Pricing (RD$)
+  prices: {
+    basic:   { monthly: 4500, onboarding_min: 6750,  onboarding_max: 13500 },
+    pro:     { monthly: 5500, onboarding_min: 8250,  onboarding_max: 16500 },
+    premium: { monthly: 9000, onboarding_min: 13500, onboarding_max: 27000 },
+  }
 };
 
-// Tier flags defined inside TIER CONFIG section below
+// ── TIER HELPERS — single source of truth ────────────────────
+function getTier() { return (CONFIG.planTier || 'basic').toLowerCase(); }
+const TIER = {
+  isBasic:   () => ['basic','pro','premium'].includes(getTier()),
+  isPro:     () => ['pro','premium'].includes(getTier()),
+  isPremium: () => getTier() === 'premium',
+  // Feature flags
+  hasVoiceIn:        () => TIER.isPro(),      // Whisper transcription (Pro+)
+  hasGoogleSheets:   () => TIER.isPro(),      // Sheets sync (Pro+)
+  hasPersistentDB:   () => TIER.isPro(),      // PostgreSQL history (Pro+)
+  hasDashboard:      () => TIER.isPro(),      // Dashboard access (Pro+)
+  hasReturningMem:   () => TIER.isPro(),      // Address memory (Pro+)
+  hasMultiLocation:  () => TIER.isPremium(),  // Multi-branch (Premium)
+  hasCustomPersona:  () => TIER.isPremium(),  // Custom bot name/tone (Premium)
+  hasProactiveFollow:() => TIER.isPremium(),  // Re-engage pending (Premium)
+  hasWeeklyReport:   () => TIER.isPremium(),  // Weekly WhatsApp report (Premium)
+  hasCustomWebhook:  () => TIER.isPremium(),  // Webhook events (Premium)
+  // All tiers get:
+  hasOrderFlow:      () => true,
+  hasOwnerNotif:     () => true,
+  hasReceipt:        () => true,
+  hasPromo:          () => true,
+  hasHoursEnforce:   () => true,
+  hasGoodbye:        () => true,
+  hasFiaoCheck:      () => true,
+  hasEnviado:        () => true,
+};
 
 // ─── CLIENTS ─────────────────────────────────────────────────
 const anthropic    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -86,6 +123,7 @@ async function initDB() {
         longitude DECIMAL(10,7),
         status VARCHAR(30) DEFAULT 'active',
         plan_tier VARCHAR(20),
+        voice_order BOOLEAN DEFAULT false,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       );
@@ -138,7 +176,7 @@ async function initDB() {
         email VARCHAR(100),
         barrio VARCHAR(100),
         address TEXT,
-        plan_tier VARCHAR(20) DEFAULT 'starter',
+        plan_tier VARCHAR(20) DEFAULT 'basic',
         status VARCHAR(20) DEFAULT 'active',
         dashboard_password VARCHAR(100),
         twilio_number VARCHAR(30),
@@ -148,9 +186,8 @@ async function initDB() {
         updated_at TIMESTAMP DEFAULT NOW()
       );
     `);
-
-    // Safe column additions for upgrades
     const alterations = [
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS voice_order BOOLEAN DEFAULT false`,
       `ALTER TABLE fiao ADD COLUMN IF NOT EXISTS last_credit DECIMAL(10,2) DEFAULT 0`,
       `ALTER TABLE fiao ADD COLUMN IF NOT EXISTS last_payment DECIMAL(10,2) DEFAULT 0`,
       `ALTER TABLE fiao ADD COLUMN IF NOT EXISTS last_credit_at TIMESTAMP`,
@@ -159,22 +196,22 @@ async function initDB() {
       `ALTER TABLE inventory ADD COLUMN IF NOT EXISTS quantity_on_hand INTEGER DEFAULT 0`,
       `ALTER TABLE inventory ADD COLUMN IF NOT EXISTS image_url TEXT`,
     ];
-    for (const sql of alterations) {
-      await db.query(sql).catch(() => {});
-    }
+    for (const sql of alterations) { await db.query(sql).catch(() => {}); }
 
-    // Load persistent order counter
     const counterRes = await db.query(`SELECT value FROM config_store WHERE key='order_counter'`);
     if (counterRes.rows.length > 0) {
       orderCounter = parseInt(counterRes.rows[0].value) || 1000;
     } else {
-      await db.query(`INSERT INTO config_store (key, value) VALUES ('order_counter', '1000') ON CONFLICT DO NOTHING`);
+      await db.query(`INSERT INTO config_store (key,value) VALUES ('order_counter','1000') ON CONFLICT DO NOTHING`);
     }
-
-    console.log('✅ Database initialized | Order counter:', orderCounter);
-  } catch (e) {
-    console.error('❌ DB init error:', e.message);
-  }
+    // Load persisted tier from DB (allows runtime upgrades)
+    const tierRes = await db.query(`SELECT value FROM config_store WHERE key='plan_tier'`);
+    if (tierRes.rows.length > 0) {
+      CONFIG.planTier = tierRes.rows[0].value;
+      console.log(`📋 Plan tier loaded from DB: ${CONFIG.planTier}`);
+    }
+    console.log(`✅ Database initialized | Plan: ${CONFIG.planTier} | Counter: ${orderCounter}`);
+  } catch(e) { console.error('❌ DB init error:', e.message); }
 }
 
 // ─── IN-MEMORY STATE ─────────────────────────────────────────
@@ -186,6 +223,13 @@ const lastCompletedOrder = new Map();
 const ownerLastCustomer  = new Map();
 let   orderCounter       = 1000;
 
+// ─── SSE CLIENTS (for live dashboard sync) ───────────────────
+const sseClients = new Set();
+function broadcastSSE(event, data) {
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  sseClients.forEach(client => { try { client.res.write(payload); } catch(e) {} });
+}
+
 // ─── INVENTORY ───────────────────────────────────────────────
 let productosList = [];
 let fiaoCuentas   = [];
@@ -194,19 +238,18 @@ async function loadInventoryFromDB() {
   try {
     const res = await db.query('SELECT * FROM inventory WHERE available = true ORDER BY category, name');
     productosList = res.rows;
-  } catch(e) { /* use defaults */ }
+  } catch(e) {}
 }
-
 async function loadFiaoFromDB() {
   try {
     const res = await db.query('SELECT * FROM fiao');
     fiaoCuentas = res.rows;
-  } catch(e) { /* use defaults */ }
+  } catch(e) {}
 }
 
-// ─── GOOGLE SHEETS SYNC (Pro) ────────────────────────────────
+// ─── GOOGLE SHEETS SYNC (Pro+) ───────────────────────────────
 async function syncGoogleSheets() {
-  if (!isPro || !CONFIG.googleSheetsId || !CONFIG.googleSheetsKey) return;
+  if (!TIER.hasGoogleSheets() || !CONFIG.googleSheetsId || !CONFIG.googleSheetsKey) return;
   try {
     const baseUrl = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.googleSheetsId}/values`;
     const key = `?key=${CONFIG.googleSheetsKey}`;
@@ -220,33 +263,25 @@ async function syncGoogleSheets() {
       productosList = (data.values || []).map(r => ({
         name: r[0], price: parseFloat(r[1]) || 0,
         available: (r[2]||'si').toLowerCase() === 'si',
-        category: r[3] || 'General',
-        sales_type: r[4] || 'unit',
-        emoji: r[5] || '📦'
+        category: r[3] || 'General', sales_type: r[4] || 'unit', emoji: r[5] || '📦'
       })).filter(p => p.available);
     }
     if (fiaoRes.ok) {
       const data = await fiaoRes.json();
-      fiaoCuentas = (data.values || []).map(r => ({
-        name: r[0], phone: r[1],
-        balance: parseFloat(r[2]) || 0
-      }));
+      fiaoCuentas = (data.values || []).map(r => ({ name: r[0], phone: r[1], balance: parseFloat(r[2]) || 0 }));
     }
     if (cfgRes.ok) {
       const data = await cfgRes.json();
       (data.values || []).forEach(r => { if (r[0] === 'Promocion_semana') CONFIG.promoSemana = r[1]; });
     }
-    console.log(`✅ Sheets synced: ${productosList.length} products, ${fiaoCuentas.length} fiado accounts`);
-  } catch(e) {
-    console.error('⚠️ Sheets sync error:', e.message);
-  }
+    console.log(`✅ Sheets synced: ${productosList.length} products`);
+  } catch(e) { console.error('⚠️ Sheets sync error:', e.message); }
 }
 
-// ─── TIME HELPERS (Santo Domingo timezone) ───────────────────
+// ─── TIME HELPERS ─────────────────────────────────────────────
 function getNowInDR() {
   return new Date(new Date().toLocaleString('en-US', { timeZone: CONFIG.timezone }));
 }
-
 function isHoursOpen() {
   const hours = CONFIG.colmadoHours;
   const now   = getNowInDR();
@@ -259,18 +294,14 @@ function isHoursOpen() {
   if (match[4].toLowerCase() === 'pm' && close !== 12) close += 12;
   return hour >= open && hour < close;
 }
-
 function getDRTimeString() {
-  const now = getNowInDR();
-  return now.toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: CONFIG.timezone });
+  return getNowInDR().toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: CONFIG.timezone });
 }
-
 function getDRDateString() {
-  const now = getNowInDR();
-  return now.toLocaleDateString('es-DO', { weekday: 'long', day: 'numeric', month: 'long', timeZone: CONFIG.timezone });
+  return getNowInDR().toLocaleDateString('es-DO', { weekday: 'long', day: 'numeric', month: 'long', timeZone: CONFIG.timezone });
 }
 
-// ─── HELPERS ─────────────────────────────────────────────────
+// ─── HELPERS ──────────────────────────────────────────────────
 function getInventoryText() {
   if (!productosList.length) return 'Inventario actualizado disponible en tienda.';
   const byCategory = productosList.reduce((acc, p) => {
@@ -283,21 +314,16 @@ function getInventoryText() {
     .map(([cat, items]) => `[${cat}]\n${items.join('\n')}`)
     .join('\n\n');
 }
-
 function getFiaoBalance(phone) {
   const clean = phone.replace(/\D/g, '').slice(-10);
   const account = fiaoCuentas.find(f => f.phone && f.phone.replace(/\D/g,'').slice(-10) === clean);
   return account ? account.balance : null;
 }
-
 async function getNextOrderNumber() {
   orderCounter++;
-  try {
-    await db.query(`UPDATE config_store SET value=$1, updated_at=NOW() WHERE key='order_counter'`, [String(orderCounter)]);
-  } catch(e) {}
+  try { await db.query(`UPDATE config_store SET value=$1, updated_at=NOW() WHERE key='order_counter'`, [String(orderCounter)]); } catch(e) {}
   return `ZRD-${orderCounter}`;
 }
-
 function isGoodbye(text) {
   const t = text.toLowerCase().trim();
   return [
@@ -307,7 +333,6 @@ function isGoodbye(text) {
     /^(ok gracias|ok thanks|listo gracias|ya gracias|perfecto gracias)$/,
   ].some(r => r.test(t));
 }
-
 function looksLikeAddress(text) {
   if (!text || text.length < 5) return false;
   const t = text.toLowerCase().trim();
@@ -316,31 +341,163 @@ function looksLikeAddress(text) {
     /^(y |dame|quiero|mándame|agrega|también|más|otro|otra)/,
     /^(espera|wait|momento)/,
     /^(enviado|pagado|listo|perfecto|excelente)/,
-    /^(gracias|thank|thanks|bye|adiós|chao)/,
     /litro|libra|unidad|caja|bolsa|jugo|leche|agua|cerveza|refresco|pollo|carne|arroz|pan|huevo|guineo|platano/,
     /RD\$|\d+\s*(peso|libra|litro)/i,
   ];
   if (rejects.some(r => r.test(t))) return false;
   const accepts = [
-    /calle|ave\b|avenida|blvd|boulevard|carretera|autopista/i,
+    /calle|ave\b|avenida|blvd|boulevard|carretera/i,
     /\#\s*\d+|\d+\s*[a-z]?\s*,/,
-    /sector|residencial|urb|urbanización|barrio|edificio|apt|apto|piso|torre/i,
+    /sector|residencial|urb|urbanización|barrio|edificio|apt|apto|piso/i,
     /esquina|entre|frente|detrás|detras|cerca|al lado/i,
     /santo domingo|santiago|la romana|punta cana|higuey|moca|barahona/i,
-    /piantini|naco|evaristo|gazcue|bella vista|arroyo hondo|los prados|ensanche|dumas|ozama|miramar/i,
+    /piantini|naco|gazcue|bella vista|arroyo hondo|ensanche|ozama/i,
   ];
   if (accepts.some(r => r.test(t))) return true;
   return t.split(/\s+/).length >= 4;
 }
 
+// ─── VOICE: Download Twilio media as base64 (kept for future use) ──
+async function downloadTwilioMediaBase64(mediaUrl) {
+  return new Promise((resolve, reject) => {
+    const auth    = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+    const urlObj  = new URL(mediaUrl);
+    const options = {
+      hostname: urlObj.hostname,
+      path:     urlObj.pathname + urlObj.search,
+      headers:  { Authorization: `Basic ${auth}` }
+    };
+    const chunks = [];
+    https.get(options, res => {
+      // Follow redirects
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        const redirectUrl = new URL(res.headers.location);
+        const redirectOpts = {
+          hostname: redirectUrl.hostname,
+          path:     redirectUrl.pathname + redirectUrl.search,
+          headers:  { Authorization: `Basic ${auth}` }
+        };
+        const chunks2 = [];
+        https.get(redirectOpts, res2 => {
+          res2.on('data', chunk => chunks2.push(chunk));
+          res2.on('end', () => resolve({
+            base64: Buffer.concat(chunks2).toString('base64'),
+            contentType: res2.headers['content-type'] || 'audio/ogg'
+          }));
+        }).on('error', reject);
+        return;
+      }
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({
+        base64: Buffer.concat(chunks).toString('base64'),
+        contentType: res.headers['content-type'] || 'audio/ogg'
+      }));
+    }).on('error', reject);
+  });
+}
+
+// ─── VOICE: Transcribe using AssemblyAI REST API ────────────
+// No SDK needed — pure HTTPS fetch. Free tier: 100hrs/month
+// Sign up at assemblyai.com and add ASSEMBLYAI_API_KEY to Railway env vars
+async function transcribeVoiceNote(mediaUrl) {
+  const ASSEMBLYAI_KEY = process.env.ASSEMBLYAI_API_KEY;
+
+  if (!ASSEMBLYAI_KEY) {
+    console.error('🎤 ASSEMBLYAI_API_KEY not set');
+    return null;
+  }
+
+  try {
+    console.log('🎤 Submitting to AssemblyAI...');
+
+    // Build authenticated Twilio URL for AssemblyAI to fetch
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken  = process.env.TWILIO_AUTH_TOKEN;
+    const authHeader = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+
+    // Step 1: Submit transcription job
+    const submitRes = await new Promise((resolve, reject) => {
+      const body = JSON.stringify({
+        audio_url:         mediaUrl,
+        language_code:     'es',
+        speech_model:      'nano',
+        http_headers: { Authorization: `Basic ${authHeader}` }
+      });
+      const opts = {
+        hostname: 'api.assemblyai.com',
+        path:     '/v2/transcript',
+        method:   'POST',
+        headers: {
+          'Authorization': ASSEMBLYAI_KEY,
+          'Content-Type':  'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        }
+      };
+      let data = '';
+      const req = https.request(opts, res => {
+        res.on('data', c => data += c);
+        res.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { reject(e); } });
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+
+    if (!submitRes.id) {
+      console.error('🎤 AssemblyAI submit failed:', JSON.stringify(submitRes));
+      return null;
+    }
+
+    const transcriptId = submitRes.id;
+    console.log(`🎤 AssemblyAI job submitted: ${transcriptId}`);
+
+    // Step 2: Poll for result (max 15 seconds — voice notes are short)
+    for (let attempt = 0; attempt < 15; attempt++) {
+      await new Promise(r => setTimeout(r, 1000)); // wait 1s between polls
+
+      const pollRes = await new Promise((resolve, reject) => {
+        const opts = {
+          hostname: 'api.assemblyai.com',
+          path:     `/v2/transcript/${transcriptId}`,
+          method:   'GET',
+          headers: { 'Authorization': ASSEMBLYAI_KEY }
+        };
+        let data = '';
+        https.get(opts, res => {
+          res.on('data', c => data += c);
+          res.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { reject(e); } });
+        }).on('error', reject);
+      });
+
+      if (pollRes.status === 'completed') {
+        const text = pollRes.text?.trim();
+        console.log(`🎤 AssemblyAI transcribed: ${text}`);
+        return text && text.length > 1 ? text : null;
+      }
+
+      if (pollRes.status === 'error') {
+        console.error('🎤 AssemblyAI error:', pollRes.error);
+        return null;
+      }
+
+      console.log(`🎤 AssemblyAI status: ${pollRes.status} (attempt ${attempt + 1})`);
+    }
+
+    console.error('🎤 AssemblyAI timed out after 15s');
+    return null;
+
+  } catch(e) {
+    console.error('🎤 AssemblyAI exception:', e.message);
+    return null;
+  }
+}
+
+// ─── SEND WHATSAPP ────────────────────────────────────────────
 async function sendWhatsApp(to, body) {
   try {
     const toNum = to.startsWith('whatsapp:') ? to : `whatsapp:${to}`;
     await twilioClient.messages.create({ from: CONFIG.twilioNumber, to: toNum, body });
-    console.log(`📤 Sent to ${toNum.substring(0,20)}: ${body.substring(0,50)}...`);
-  } catch (e) {
-    console.error('❌ WhatsApp send error:', e.message);
-  }
+  } catch(e) { console.error('❌ WhatsApp send error:', e.message); }
 }
 
 // ─── FORMATTERS ──────────────────────────────────────────────
@@ -355,7 +512,7 @@ function formatReceipt(orderData) {
 📞 ${CONFIG.colmadoPhone}
 ━━━━━━━━━━━━━━━━━━━━
 🔖 Recibo #: ${orderData.orderNumber}
-📅 ${dateStr} a las ${timeStr}
+📅 ${dateStr} a las ${timeStr}${orderData.voiceOrder ? '\n🎤 Pedido por nota de voz' : ''}
 ━━━━━━━━━━━━━━━━━━━━
 📦 DETALLE DEL PEDIDO:
 ${orderData.items}
@@ -369,12 +526,11 @@ ${orderData.items}
 }
 
 function formatSellerNotification(orderData) {
-  const now     = getNowInDR();
-  const timeStr = now.toLocaleTimeString('es-DO', { hour: '2-digit', minute: '2-digit', timeZone: CONFIG.timezone });
+  const timeStr = getDRTimeString();
   return `🛒 NUEVO PEDIDO — ${CONFIG.colmadoName}
 ━━━━━━━━━━━━━━━━━━━━
 🔖 Pedido #: ${orderData.orderNumber}
-⏰ ${timeStr}
+⏰ ${timeStr}${orderData.voiceOrder ? ' 🎤 (voz)' : ''}
 👤 Cliente: +${orderData.phone}
 ━━━━━━━━━━━━━━━━━━━━
 📦 DETALLE:
@@ -384,8 +540,7 @@ ${orderData.items}
 📬 Dirección: ${orderData.address}
 ━━━━━━━━━━━━━━━━━━━━
 ✅ Cuando salga el pedido responde:
-ENVIADO
-(o: ENVIADO +1809XXXXXXX para otro cliente)`;
+ENVIADO`;
 }
 
 function formatDispatchNotification(orderData) {
@@ -405,7 +560,6 @@ ${orderData.items}
 function detectOrderSummary(text) {
   return text.includes('TOTAL: RD$') || text.includes('TOTAL:RD$');
 }
-
 function extractOrderItems(text) {
   const lines = text.split('\n');
   const itemLines = lines.filter(l =>
@@ -417,24 +571,26 @@ function extractOrderItems(text) {
 
 // ─── DB HELPERS ──────────────────────────────────────────────
 async function saveOrderToDB(orderData) {
+  if (!TIER.hasPersistentDB()) return; // Basic: no persistent storage
   try {
     await db.query(`
-      INSERT INTO orders (order_number, phone, items, items_summary, total, address, latitude, longitude, status, plan_tier)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      INSERT INTO orders (order_number,phone,items,items_summary,total,address,latitude,longitude,status,plan_tier,voice_order)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       ON CONFLICT (order_number) DO UPDATE SET status=$9, updated_at=NOW()
     `, [
       orderData.orderNumber, orderData.phone, orderData.items,
       orderData.items?.substring(0,200), orderData.total,
       orderData.address, orderData.lat||null, orderData.lng||null,
-      orderData.status||'completed', CONFIG.planTier
+      orderData.status||'completed', CONFIG.planTier, orderData.voiceOrder||false
     ]);
   } catch(e) { console.error('❌ DB save error:', e.message); }
 }
 
 async function saveConversationToDB(phone, messages, location) {
+  if (!TIER.hasPersistentDB()) return;
   try {
     await db.query(`
-      INSERT INTO conversations (phone, messages, last_address, last_lat, last_lng, customer_type, order_count, updated_at)
+      INSERT INTO conversations (phone,messages,last_address,last_lat,last_lng,customer_type,order_count,updated_at)
       VALUES ($1,$2,$3,$4,$5,'returning',1,NOW())
       ON CONFLICT (phone) DO UPDATE SET
         messages=$2,
@@ -445,243 +601,128 @@ async function saveConversationToDB(phone, messages, location) {
         order_count=conversations.order_count+1,
         updated_at=NOW()
     `, [phone, JSON.stringify(messages), location?.address||null, location?.lat||null, location?.lng||null]);
-  } catch(e) { console.error('❌ Conversation save error:', e.message); }
+  } catch(e) {}
 }
 
 async function getCustomerFromDB(phone) {
+  if (!TIER.hasPersistentDB()) return null;
   try {
     const res = await db.query('SELECT * FROM conversations WHERE phone=$1', [phone]);
     return res.rows[0] || null;
   } catch(e) { return null; }
 }
 
-// ─── TIER CONFIG ─────────────────────────────────────────────
-const TIER = CONFIG.planTier.toLowerCase();
-const isBasic   = TIER === 'basic';
-const isPro     = TIER === 'pro';
-const isPremium = ['premium','enterprise'].includes(TIER);
-
-// Bot name — Premium can have custom name via BOT_NAME env var
-const BOT_NAME = process.env.BOT_NAME || 'Zoe';
-
-// ─── SYSTEM PROMPT ───────────────────────────────────────────
+// ─── SYSTEM PROMPT (tier-aware) ──────────────────────────────
 function buildSystemPrompt(phone, customerType, fiaoBalance) {
-  const open      = isHoursOpen();
-  const drTime    = getDRTimeString();
-  const drDate    = getDRDateString();
-  const inventory = getInventoryText();
-  const promoText = CONFIG.promoSemana ? `\n🎉 PROMOCIÓN ESTA SEMANA: ${CONFIG.promoSemana}` : '';
-  const fiaoText  = fiaoBalance !== null
-    ? `\n💳 FIADO ESTE CLIENTE: RD$${fiaoBalance}`
-    : '\n💳 FIADO: Sin cuenta registrada';
-  const locationInfo = customerType === 'returning'
-    ? `\n📍 CLIENTE RECURRENTE: Tiene dirección guardada. NO pedir dirección.`
-    : `\n📍 CLIENTE NUEVO: NO pedir dirección — el sistema lo maneja automáticamente.`;
+  const open         = isHoursOpen();
+  const drTime       = getDRTimeString();
+  const drDate       = getDRDateString();
+  const inventory    = getInventoryText();
+  const promoText    = CONFIG.promoSemana ? `\n🎉 PROMOCIÓN: ${CONFIG.promoSemana}` : '';
+  const fiaoText     = TIER.hasFiaoCheck() && fiaoBalance !== null
+    ? `\n💳 FIADO ESTE CLIENTE: RD$${fiaoBalance}` : '';
+  const locationInfo = (TIER.hasReturningMem() && customerType === 'returning')
+    ? '\n📍 CLIENTE RECURRENTE: Tiene dirección guardada. NO pedir dirección.' 
+    : '\n📍 CLIENTE NUEVO: NO pedir dirección — el sistema lo maneja automáticamente.';
+  const tierNote = `\n🏷️ PLAN ACTIVO: ${getTier().toUpperCase()}`;
 
   const closedInstructions = !open ? `
 ⚠️ ESTAMOS CERRADOS AHORA (son las ${drTime}).
-- Reconoce el pedido con calidez
-- Explica que están cerrados
-- Promete: "Mañana cuando abramos te confirmo si aún necesitas que te enviemos eso 😊"
-- NO generes TOTAL: RD$ cuando estamos cerrados
+- Reconoce el pedido con entusiasmo
+- Explica amablemente que están cerrados
+- Promete: "Mañana cuando abramos te confirmo 😊"
+- NO generes TOTAL ni actives el flujo de pedido
+- Anota el pedido sin formato de recibo
 ` : '';
 
-  // ── BASIC PERSONALITY ──────────────────────────────────────
-  if (isBasic) {
-    return `Eres ${BOT_NAME} 🤖, la asistente de WhatsApp de ${CONFIG.colmadoName} en ${CONFIG.colmadoBarrio}, República Dominicana.
+  return `Eres Zoe 🤖✨, la asistente virtual más chévere del ${CONFIG.colmadoName} en ${CONFIG.colmadoBarrio}, República Dominicana.
 Creada por ZemiRD Automations (${CONFIG.zemirdWeb}).
 
-🕐 HORA EN RD: ${drTime} — ${drDate}
+🕐 HORA: ${drTime} — ${drDate}
 📅 ESTADO: ${open ? '✅ ABIERTOS' : `❌ CERRADOS (${CONFIG.colmadoHours})`}
 ${closedInstructions}
 
-PERSONALIDAD:
-- Amigable, directa y eficiente. Como una cajera simpática. 😊
-- Usa frases simples: "¡Claro!", "¡Listo!", "¿Algo más?"
-- Máximo 4 líneas por mensaje. Esto es WhatsApp.
-- Auto-detecta idioma (español/inglés).
-- NUNCA digas "OK" seco — di "¡Listo!" o "¡Claro que sí!"
+🎭 PERSONALIDAD — CRÍTICO:
+- Eres dominicana, cálida, graciosa, carismática. La vecina más cool del barrio 🏘️
+- Hablas con sabor: "¡Ta' bien!", "¡Claro que sí, mi amor!", "¡Tamo' con eso!"
+- Emojis con estilo 😄🛵🎉🔥💚
+- NUNCA respondas con "OK" solo. NUNCA empiezes con "Entendido". NUNCA uses frases robóticas.
+- NUNCA envíes un mensaje de solo "OK" — siempre agrega algo de contenido y personalidad.
+- Saluda diferente cada vez. Auto-detecta idioma.
+- Máximo 5 líneas por respuesta. WhatsApp no es una novela 📱
 
-FORMATO DE PEDIDO:
-• [Producto] x[cantidad] = RD$[subtotal]
-TOTAL: RD$[total]
-¿Algo más? 🛵
+🌟 USA ESTO EN VEZ DE:
+- "OK" → "¡Tamo' con eso! 🔥" o "¡Perfecto mi amor! ✨"
+- "Entendido" → "¡Anotado! 📝" o "¡Claro que sí! 💪"  
+- "¿Algo más?" → "¿Y qué más le pongo? 🛵" o "¿Algo más pa' completar? 😄"
 
-REGLAS:
-- NUNCA preguntes por dirección — el sistema lo maneja
-- NUNCA digas "en camino" — eso lo confirma el dueño
-- Si cerrado: NO generes TOTAL:RD$
-
-DESPEDIDA ("gracias", "bye", "eso es todo"):
-Responde con despedida amistosa. Nada más.
-
-RESPUESTAS:
-1. PEDIDO: bullets → TOTAL → ¿Algo más?
-2. FIADO: balance exacto. Si cero: "¡Estás al día! ✅"
-3. INFO: horas, dirección, zona, mínimo
-4. CONTACTO: toda la info
-
-INFO:
-🏪 ${CONFIG.colmadoName} | ${CONFIG.colmadoAddress}, ${CONFIG.colmadoBarrio}
-📞 ${CONFIG.colmadoPhone} | ⏰ ${CONFIG.colmadoHours}
-🛵 Delivery: ${CONFIG.deliveryTime} | Zona: ${CONFIG.deliveryZone} | Mínimo: ${CONFIG.minDelivery}
-${promoText}${fiaoText}${locationInfo}
-
-INVENTARIO:
-${inventory}`;
-  }
-
-  // ── PRO PERSONALITY ───────────────────────────────────────
-  if (isPro) {
-    return `Eres ${BOT_NAME} 🤖✨, la asistente virtual de ${CONFIG.colmadoName} en ${CONFIG.colmadoBarrio}, República Dominicana.
-Creada con mucho amor por ZemiRD Automations (${CONFIG.zemirdWeb}).
-
-🕐 HORA ACTUAL EN RD: ${drTime} — ${drDate}
-📅 ESTADO: ${open ? '✅ ABIERTOS Y LISTOS PARA SERVIRTE' : `❌ CERRADOS (Horario: ${CONFIG.colmadoHours})`}
-${closedInstructions}
-
-🎭 PERSONALIDAD:
-- Eres dominicana, cálida, graciosa y carismática. Como la vecina más cool del barrio. 🏘️
-- Hablas con sabor dominicano: "¡Ta' bien!", "¡Claro que sí, mi amor!", "¡Tamo' con eso!"
-- Usas emojis con estilo 😄🛵🎉🔥💚
-- Eres rápida y eficiente. Nunca dejas al cliente esperando.
-- Tienes sentido del humor — si el cliente dice algo gracioso, ríete con él 😂
-- NUNCA respondas "OK" seco. Siempre agrega personalidad.
-- Auto-detecta idioma: responde en español o inglés según el cliente.
-
-🌟 EJEMPLOS:
-- "¡Tamo' con eso! 🔥" en vez de "OK"
-- "¡Anotado! Ya lo proceso 📝" en vez de "Entendido"
-- "¿Y qué más le pongo, que la cocina está encendida? 🔥😄" en vez de "¿Algo más?"
-
-📦 FORMATO DE PEDIDO:
+📦 FORMATO DE PEDIDO (EXACTAMENTE ASÍ, sin texto antes):
 • [Producto] x[cantidad] = RD$[subtotal]
 TOTAL: RD$[total]
 ¿Y qué más? 🛵
 
-REGLAS:
-- NUNCA preguntes por dirección — el sistema lo maneja mágicamente 🪄
+REGLAS CRÍTICAS:
+- NUNCA texto antes de los bullets del pedido
+- NUNCA preguntes por dirección — el sistema lo maneja 🪄
 - NUNCA digas "en camino" — eso lo confirma el dueño
-- Si cerrado: NO generes TOTAL:RD$
-- Máximo 5 líneas. WhatsApp no es una novela. 📱
+- Si CERRADOS: NO generes TOTAL — solo anota el pedido
+- Si el cliente pregunta por oferta/promo: respóndelo JUNTO con el flujo, no antes de confirmar el pedido
 
-DESPEDIDA ("gracias", "bye", "eso es todo"):
-Despídete con cariño y humor. Ej: "¡Hasta luego! Fue un placer servirte 😊🙌 ¡Vuelve pronto!"
+🛑 DESPEDIDA: Cuando el cliente diga "gracias", "eso es todo", "bye":
+Despídete con cariño. NO pidas dirección. NO hagas más nada.
 
-RESPUESTAS CLAVE:
-1. PEDIDO: bullets → TOTAL: RD$X → pregunta creativa
-2. FIADO: balance exacto. Si cero: "¡Estás limpio! ✅ No debes nada 🎉"
-3. INFO: horas, dirección, zona, mínimo — con entusiasmo
-4. CONTACTO: toda la info. Termina con "¡Con gusto te atendemos! 😊🙌"
-
-INFO:
-🏪 ${CONFIG.colmadoName} | ${CONFIG.colmadoAddress}, ${CONFIG.colmadoBarrio}
+🏪 INFO:
+${CONFIG.colmadoName} | ${CONFIG.colmadoAddress}, ${CONFIG.colmadoBarrio}
 📞 ${CONFIG.colmadoPhone} | ⏰ ${CONFIG.colmadoHours}
 🛵 Delivery: ${CONFIG.deliveryTime} | Zona: ${CONFIG.deliveryZone} | Mínimo: ${CONFIG.minDelivery}
-${promoText}${fiaoText}${locationInfo}
+${promoText}${fiaoText}${locationInfo}${tierNote}
 
-INVENTARIO:
-${inventory}`;
-  }
-
-  // ── PREMIUM PERSONALITY ──────────────────────────────────
-  return `Eres ${BOT_NAME}${BOT_NAME === 'Zoe' ? ' 🌟' : ''}, la asistente personal de ${CONFIG.colmadoName} — ${CONFIG.colmadoBarrio}, República Dominicana.
-Desarrollada exclusivamente por ZemiRD Automations (${CONFIG.zemirdWeb}).
-
-🕐 ${drTime} · ${drDate}
-${open ? '✅ Servicio activo' : `❌ Fuera de horario (${CONFIG.colmadoHours})`}
-${closedInstructions}
-
-🎭 PERSONALIDAD PREMIUM:
-- Eres sofisticada, cálida y memorable. Cada interacción se siente especial.
-- Combinas elegancia dominicana con eficiencia de clase mundial.
-- Hablas con confianza y carisma: "Con mucho gusto", "Es un placer atenderte", "Déjame resolverlo ahora mismo"
-- Usas emojis selectivamente — solo cuando añaden valor real ✨
-- Tienes memoria contextual: si el cliente mencionó algo antes, lo recuerdas.
-- Tratas a cada cliente como si fuera el más importante del día.
-- Auto-detecta idioma con fluidez perfecta en español e inglés.
-- NUNCA dices "OK" ni "Entendido". Tu vocabulario es rico y variado.
-- Personalidad consistente, nunca robótica, siempre humana.
-
-🌟 EJEMPLOS DE RESPUESTAS PREMIUM:
-- "¡Con gusto! Te preparo eso ahora mismo ✨" en vez de "OK"
-- "Perfecto, lo anoto. ¿Hay algo más en lo que pueda ayudarte?" en vez de "¿Algo más?"
-- "Es un placer atenderte. Tu pedido está en camino 🛵" al despedirse
-- Si el cliente es recurrente: "¡Qué bueno verte de nuevo! Como siempre, aquí para servirte 😊"
-
-📦 FORMATO DE PEDIDO:
-• [Producto] x[cantidad] = RD$[subtotal]
-━━━━━━━━━━━━━━
-TOTAL: RD$[total]
-¿Deseas agregar algo más a tu pedido? ✨
-
-REGLAS PREMIUM:
-- NUNCA preguntes por dirección — el sistema lo gestiona automáticamente
-- NUNCA confirmes envío — eso lo hace el dueño
-- Si cerrado: reconoce elegantemente y promete seguimiento
-- Respuestas concisas pero memorables — máximo 6 líneas
-- Cuando sea cliente recurrente, menciona que recuerdas su preferencia
-
-DESPEDIDA:
-Cierra siempre con elegancia. Ej: "Fue un placer atenderte. ¡Hasta pronto! ✨"
-
-RESPUESTAS CLAVE:
-1. PEDIDO: formato premium → TOTAL: RD$X → oferta elegante de agregar más
-2. FIADO: balance exacto con contexto. Si cero: "¡Estás al día! ✅ Un gusto hacer negocios contigo."
-3. INFO: completa, bien presentada, con entusiasmo profesional
-4. CONTACTO: toda la info + cierre premium "Estamos a tu disposición 🌟"
-
-INFO:
-🏪 ${CONFIG.colmadoName} | ${CONFIG.colmadoAddress}, ${CONFIG.colmadoBarrio}
-📞 ${CONFIG.colmadoPhone} | ⏰ ${CONFIG.colmadoHours}
-🛵 Delivery: ${CONFIG.deliveryTime} | Zona: ${CONFIG.deliveryZone} | Mínimo: ${CONFIG.minDelivery}
-${promoText}${fiaoText}${locationInfo}
-
-INVENTARIO DISPONIBLE:
+📋 INVENTARIO:
 ${inventory}`;
 }
-
 
 // ─── COMPLETE ORDER ───────────────────────────────────────────
 async function completeOrder(phone, from, locData, orderState) {
   if (orderState.timer) clearTimeout(orderState.timer);
 
   const orderNumber = await getNextOrderNumber();
-  const orderData   = {
+  const orderData = {
     orderNumber, phone,
-    items:   orderState.items,
-    total:   orderState.total,
-    address: locData.address,
-    lat:     locData.lat,
-    lng:     locData.lng,
-    status:  'completed',
+    items:      orderState.items,
+    total:      orderState.total,
+    address:    locData.address,
+    lat:        locData.lat,
+    lng:        locData.lng,
+    status:     'completed',
+    voiceOrder: orderState.voiceOrder || false,
   };
 
-  customerLocations.set(phone, locData);
+  if (TIER.hasReturningMem()) customerLocations.set(phone, locData);
   await saveConversationToDB(phone, conversations.get(phone)?.messages || [], locData);
   await sendWhatsApp(from, formatReceipt(orderData));
   await saveOrderToDB(orderData);
 
-  // Seller notification — ALWAYS fires
-  // Normalize OWNER_WHATSAPP to ensure whatsapp: prefix
-  let ownerDest = CONFIG.ownerWhatsapp;
-  if (ownerDest && !ownerDest.startsWith('whatsapp:')) {
-    ownerDest = `whatsapp:${ownerDest.startsWith('+') ? ownerDest : '+' + ownerDest}`;
-  }
-
-  if (ownerDest) {
-    console.log(`📱 Sending seller notification to: ${ownerDest}`);
-    await sendWhatsApp(ownerDest, formatSellerNotification(orderData));
-    const ownerPhone = ownerDest.replace('whatsapp:','').replace('+','');
+  if (CONFIG.ownerWhatsapp) {
+    await sendWhatsApp(CONFIG.ownerWhatsapp, formatSellerNotification(orderData));
+    const ownerPhone = CONFIG.ownerWhatsapp.replace('whatsapp:','').replace('+','');
     ownerLastCustomer.set(ownerPhone, phone);
-    console.log(`✅ Seller notified | Order: ${orderNumber} | To: ${ownerDest}`);
-  } else {
-    console.warn('⚠️ OWNER_WHATSAPP not set — seller not notified! Set it in Railway variables.');
   }
 
   lastCompletedOrder.set(phone, orderData);
+
+  // Broadcast to SSE dashboard clients
+  broadcastSSE('new_order', {
+    orderNumber:  orderData.orderNumber,
+    phone:        orderData.phone,
+    items:        orderData.items,
+    total:        orderData.total,
+    address:      orderData.address,
+    voiceOrder:   orderData.voiceOrder,
+    timestamp:    new Date().toISOString(),
+  });
+
   setTimeout(() => orderStates.delete(phone), 500);
-  console.log(`✅ Order completed: ${orderNumber} | ${phone} | RD$${orderData.total}`);
+  console.log(`✅ Order: ${orderNumber} | ${phone} | RD$${orderData.total} | Voice: ${orderData.voiceOrder}`);
 }
 
 // ─── ORDER TIMEOUT ────────────────────────────────────────────
@@ -689,24 +730,27 @@ async function triggerOrderTimeout(phone, from) {
   const orderState = orderStates.get(phone);
   if (!orderState) return;
 
-  const savedLoc   = customerLocations.get(phone);
+  // FIX: Try saved location first (returning customers, Pro+)
+  const savedLoc = TIER.hasReturningMem() ? customerLocations.get(phone) : null;
   const dbCustomer = await getCustomerFromDB(phone);
-  const dbLoc      = dbCustomer?.last_address ? {
+  const dbLoc = dbCustomer?.last_address ? {
     address: dbCustomer.last_address, lat: dbCustomer.last_lat, lng: dbCustomer.last_lng
   } : null;
   const location = savedLoc || dbLoc;
 
   if (location) {
+    // Returning customer — complete with saved address
     await completeOrder(phone, from, location, orderState);
   } else if (orderState.state === 'awaiting_extras') {
+    // New customer — NOW request address (after order is closed)
     orderState.state = 'awaiting_location';
     orderStates.set(phone, orderState);
-    await sendWhatsApp(from, '📍 ¿A qué dirección te lo enviamos?\nEscríbela o comparte tu ubicación 📌');
+    await sendWhatsApp(from, '📍 ¡Perfecto! Solo necesito tu dirección para enviártelo 🛵\n¿Dónde te lo mandamos?');
 
     orderState.timer = setTimeout(async () => {
       const os = orderStates.get(phone);
       if (os?.state === 'awaiting_location') {
-        await sendWhatsApp(from, '📍 Oye, ¿cuál es tu dirección? ¡El delivery está listo para salir! 🛵');
+        await sendWhatsApp(from, '📍 Oye, ¿cuál es tu dirección? ¡El delivery está listo! 🛵');
         orderState.timer = setTimeout(async () => {
           const os2 = orderStates.get(phone);
           if (os2?.state === 'awaiting_location') {
@@ -715,8 +759,9 @@ async function triggerOrderTimeout(phone, from) {
             orderStates.delete(phone);
             if (CONFIG.ownerWhatsapp) {
               await sendWhatsApp(CONFIG.ownerWhatsapp,
-                `⚠️ PEDIDO PENDIENTE — Cliente no respondió con dirección\n👤 ${phone}\n📦 ${os2.items}\n💰 RD$${os2.total}`);
+                `⚠️ PEDIDO PENDIENTE — Sin dirección\n👤 ${phone}\n📦 ${os2.items}\n💰 RD$${os2.total}`);
             }
+            broadcastSSE('pending_order', { phone, items: os2.items, total: os2.total });
           }
         }, 60000);
         orderStates.set(phone, orderState);
@@ -738,120 +783,51 @@ app.post('/webhook', async (req, res) => {
   const phone     = from.replace('whatsapp:', '').replace('+', '');
   const numMedia  = parseInt(req.body.NumMedia || '0');
   const mediaType = (req.body.MediaContentType0 || '').toLowerCase();
+  let   isVoice   = false;
 
   if (!from) return;
 
-  // ── VOICE MESSAGE HANDLING ──
-  // Twilio sends WhatsApp voice notes as audio/ogg media attachments
-  if (numMedia > 0 && (mediaType.includes('audio') || mediaType.includes('ogg') || mediaType.includes('mpeg') || mediaType.includes('amr'))) {
-    console.log(`🎤 Voice note from ${phone} | type: ${mediaType}`);
-    await sendWhatsApp(from, `🎤 ¡Recibí tu nota de voz! Déjame escucharla... 👂`);
-
-    try {
-      const mediaUrl = req.body.MediaUrl0 || '';
-      if (!mediaUrl) throw new Error('No media URL');
-
-      // Download audio from Twilio with authentication
-      const https = require('https');
-      const audioBuffer = await new Promise((resolve, reject) => {
-        const url = new URL(mediaUrl);
-        const options = {
-          hostname: url.hostname,
-          path: url.pathname + url.search,
-          headers: {
-            'Authorization': 'Basic ' + Buffer.from(
-              `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
-            ).toString('base64')
-          }
-        };
-        https.get(options, (res) => {
-          // Follow redirects
-          if (res.statusCode === 301 || res.statusCode === 302) {
-            const redirectUrl = new URL(res.headers.location);
-            const redirectOptions = {
-              hostname: redirectUrl.hostname,
-              path: redirectUrl.pathname + redirectUrl.search,
-              headers: {
-                'Authorization': 'Basic ' + Buffer.from(
-                  `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
-                ).toString('base64')
-              }
-            };
-            https.get(redirectOptions, (res2) => {
-              const chunks = [];
-              res2.on('data', c => chunks.push(c));
-              res2.on('end', () => resolve(Buffer.concat(chunks)));
-              res2.on('error', reject);
-            }).on('error', reject);
-            return;
-          }
-          const chunks = [];
-          res.on('data', c => chunks.push(c));
-          res.on('end', () => resolve(Buffer.concat(chunks)));
-          res.on('error', reject);
-        }).on('error', reject);
-      });
-
-      // Use Claude to transcribe by sending as base64
-      const base64Audio = audioBuffer.toString('base64');
-      const transcribeResponse = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 300,
-        messages: [{
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: `This is a WhatsApp voice note audio file (OGG/OPUS format) from a customer of ${CONFIG.colmadoName} in the Dominican Republic. Please transcribe exactly what is said. Return ONLY the transcribed text, nothing else. If you cannot transcribe it, return the text: UNTRANSCRIBABLE`
-            },
-            {
-              type: 'document',
-              source: {
-                type: 'base64',
-                media_type: 'application/octet-stream',
-                data: base64Audio
-              }
-            }
-          ]
-        }]
-      });
-
-      const transcribed = transcribeResponse.content[0]?.text?.trim();
-
-      if (!transcribed || transcribed === 'UNTRANSCRIBABLE' || transcribed.length < 2) {
-        throw new Error('Could not transcribe');
+  // ── VOICE MESSAGE HANDLING ──────────────────────────────────
+  if (numMedia > 0 && (mediaType.includes('audio') || mediaType.includes('ogg') || mediaType.includes('mpeg'))) {
+    if (TIER.hasVoiceIn()) {
+      // Pro+: Use Whisper to transcribe
+      const mediaUrl = req.body.MediaUrl0;
+      const transcribed = await transcribeVoiceNote(mediaUrl);
+      if (transcribed && transcribed.length > 2) {
+        body = transcribed;
+        isVoice = true;
+        console.log(`🎤 Claude transcribed [${phone}]: ${transcribed}`);
+        // Echo transcription back so user knows it was heard
+        await sendWhatsApp(from, `🎤 Entendí: "${transcribed.substring(0,80)}${transcribed.length>80?'...':''}" ✅`);
+      } else {
+        await sendWhatsApp(from, '🎤 No pude entender bien la nota de voz 😅\n¿Puedes repetirlo o escribirlo?');
+        return;
       }
-
-      console.log(`🎤 Transcribed: ${transcribed}`);
-      body = `[Nota de voz transcrita]: ${transcribed}`;
-
-    } catch(e) {
-      console.error('❌ Voice transcription failed:', e.message);
-      // Fallback — ask user to type
-      await sendWhatsApp(from, `😅 ¡Lo intenté pero no pude entender la nota!\n¿Puedes escribir tu pedido? Prometo que soy más rápida leyendo. 😄`);
+    } else {
+      // Basic: No voice transcription
+      await sendWhatsApp(from, '🎤 ¡Hola! Las notas de voz están disponibles en el plan Pro 🚀\nEscríbeme tu pedido y te atiendo al instante 😊');
       return;
     }
   }
 
-  console.log(`📩 [${getDRTimeString()}] From: ${phone} | Msg: ${body.substring(0,80)}`);
+  console.log(`📩 [${getDRTimeString()}] ${phone}: ${body.substring(0,80)}`);
 
-  // ── OWNER ENVIADO COMMAND ──
+  // ── OWNER ENVIADO COMMAND ──────────────────────────────────
   const ownerPhone = CONFIG.ownerWhatsapp.replace('whatsapp:','').replace('+','');
   if (body.toUpperCase().startsWith('ENVIADO') && CONFIG.ownerWhatsapp &&
       (phone === ownerPhone || `+${phone}` === CONFIG.ownerWhatsapp.replace('whatsapp:', ''))) {
-
     const parts       = body.trim().split(/\s+/);
     const targetRaw   = parts[1];
     const targetPhone = targetRaw ? targetRaw.replace('+','') : null;
     const customerPhone = targetPhone || ownerLastCustomer.get(ownerPhone);
-
     if (customerPhone) {
       const lastOrder = lastCompletedOrder.get(customerPhone);
       if (lastOrder) {
         const customerWA = customerPhone.startsWith('whatsapp:') ? customerPhone : `whatsapp:+${customerPhone}`;
         await sendWhatsApp(customerWA, formatDispatchNotification(lastOrder));
         orderStates.delete(customerPhone);
-        await sendWhatsApp(from, `✅ Cliente notificado que su pedido #${lastOrder.orderNumber} está en camino 🛵`);
+        await sendWhatsApp(from, `✅ Cliente notificado — pedido #${lastOrder.orderNumber} en camino 🛵`);
+        broadcastSSE('order_dispatched', { orderNumber: lastOrder.orderNumber, phone: customerPhone });
       } else {
         await sendWhatsApp(from, '⚠️ No encontré pedido reciente para ese cliente.');
       }
@@ -861,21 +837,21 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
-  // ── GET CUSTOMER STATE ──
+  // ── CUSTOMER STATE ──────────────────────────────────────────
   let dbCustomer   = await getCustomerFromDB(phone);
   let customerType = dbCustomer?.customer_type || 'new';
-  const memLoc = customerLocations.get(phone);
-  const dbLoc  = dbCustomer?.last_address ? {
+  const memLoc     = TIER.hasReturningMem() ? customerLocations.get(phone) : null;
+  const dbLoc      = dbCustomer?.last_address ? {
     address: dbCustomer.last_address, lat: dbCustomer.last_lat, lng: dbCustomer.last_lng
   } : null;
   const savedLocation = memLoc || dbLoc;
   if (savedLocation) customerType = 'returning';
 
-  // ── LOCATION PIN ──
+  // ── LOCATION PIN ────────────────────────────────────────────
   if (lat && lng) {
     const locAddress = address || `${lat}, ${lng}`;
     const locData    = { address: locAddress, lat: parseFloat(lat), lng: parseFloat(lng) };
-    customerLocations.set(phone, locData);
+    if (TIER.hasReturningMem()) customerLocations.set(phone, locData);
     const orderState = orderStates.get(phone);
     if (orderState && (orderState.state === 'awaiting_location' || orderState.state === 'awaiting_extras')) {
       await completeOrder(phone, from, locData, orderState);
@@ -887,25 +863,25 @@ app.post('/webhook', async (req, res) => {
 
   const orderState = orderStates.get(phone);
 
-  // ── GOODBYE — close order flow ──
+  // ── GOODBYE ─────────────────────────────────────────────────
   if (isGoodbye(body)) {
     if (orderState?.timer) clearTimeout(orderState.timer);
     if (orderState) orderStates.delete(phone);
   }
 
-  // ── TEXT ADDRESS ──
+  // ── TEXT ADDRESS (while awaiting_location) ──────────────────
   if (orderState && orderState.state === 'awaiting_location' && !isGoodbye(body)) {
     if (looksLikeAddress(body)) {
       const locData = { address: body };
-      customerLocations.set(phone, locData);
+      if (TIER.hasReturningMem()) customerLocations.set(phone, locData);
       await completeOrder(phone, from, locData, orderState);
       return;
     }
   }
 
-  // ── WAIT/RESET ──
+  // ── WAIT/ADD MORE ──────────────────────────────────────────
   if (orderState && !isGoodbye(body) &&
-      ['espera','wait','momento','add more','agrega','añade','también','tambien','y también','y tambien'].some(w => body.toLowerCase().includes(w))) {
+      ['espera','wait','momento','agrega','añade','también','tambien','y también','y tambien'].some(w => body.toLowerCase().includes(w))) {
     if ((orderState.resetCount || 0) >= 3) {
       const loc = savedLocation || customerLocations.get(phone);
       if (loc) {
@@ -925,7 +901,7 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
-  // ── CONVERSATION ──
+  // ── CONVERSATION ────────────────────────────────────────────
   let convData = conversations.get(phone) || { messages: [], lastActivity: Date.now() };
   convData.lastActivity = Date.now();
   if (!conversations.has(phone) && dbCustomer?.messages) {
@@ -936,7 +912,7 @@ app.post('/webhook', async (req, res) => {
     } catch(e) {}
   }
 
-  const fiaoBalance  = getFiaoBalance(phone);
+  const fiaoBalance  = TIER.hasFiaoCheck() ? getFiaoBalance(phone) : null;
   const systemPrompt = buildSystemPrompt(phone, customerType, fiaoBalance);
   convData.messages.push({ role: 'user', content: body });
   if (convData.messages.length > 16) convData.messages = convData.messages.slice(-16);
@@ -950,26 +926,26 @@ app.post('/webhook', async (req, res) => {
     claudeReply = response.content[0]?.text || '¡Hola! ¿En qué te puedo ayudar? 😊';
   } catch(e) {
     console.error('❌ Claude error:', e.message);
-    claudeReply = `¡Ay, se me fue la luz por un momento! 😅 Llámanos al ${CONFIG.colmadoPhone} que te atendemos ahí mismo.`;
+    claudeReply = `¡Ay, se me fue la luz! 😅 Llámanos al ${CONFIG.colmadoPhone}`;
   }
 
   convData.messages.push({ role: 'assistant', content: claudeReply });
   conversations.set(phone, convData);
   await sendWhatsApp(from, claudeReply);
 
-  // ── DETECT ORDER — only when open ──
+  // ── DETECT ORDER — only when open ──────────────────────────
   if (detectOrderSummary(claudeReply) && !isGoodbye(body) && isHoursOpen()) {
     const { items, total } = extractOrderItems(claudeReply);
     if (orderState?.timer) clearTimeout(orderState.timer);
-    const newOrderState = { state: 'awaiting_extras', items, total, resetCount: 0, phone, from };
-    const timerMs = customerType === 'returning' ? 45000 : 30000;
-    newOrderState.timer = setTimeout(() => triggerOrderTimeout(phone, from), timerMs);
-    orderStates.set(phone, newOrderState);
-    console.log(`📦 Order detected: ${phone} | RD$${total} | ${timerMs/1000}s timer`);
+    const timerMs = (TIER.hasReturningMem() && customerType === 'returning') ? 45000 : 30000;
+    const newState = { state: 'awaiting_extras', items, total, resetCount: 0, phone, from, voiceOrder: isVoice };
+    newState.timer = setTimeout(() => triggerOrderTimeout(phone, from), timerMs);
+    orderStates.set(phone, newState);
+    broadcastSSE('order_started', { phone, total, items: items.substring(0,100) });
   }
 });
 
-// ─── ADMIN REST API ───────────────────────────────────────────
+// ─── ADMIN AUTH ───────────────────────────────────────────────
 const checkAuth = (req, res, next) => {
   const auth = req.headers.authorization || req.query.key;
   if (auth !== CONFIG.dashboardPass && auth !== `Bearer ${CONFIG.dashboardPass}`) {
@@ -978,11 +954,84 @@ const checkAuth = (req, res, next) => {
   next();
 };
 
+// ─── SSE ENDPOINT — Live Dashboard Sync ──────────────────────
+app.get('/api/stream', checkAuth, (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  // Send initial heartbeat
+  res.write('event: connected\ndata: {"status":"connected","plan":"'+ CONFIG.planTier +'"}\n\n');
+
+  // Heartbeat every 20s
+  const heartbeat = setInterval(() => {
+    try { res.write(`:heartbeat\n\n`); } catch(e) {}
+  }, 20000);
+
+  const client = { res, id: Date.now() };
+  sseClients.add(client);
+  console.log(`📡 SSE client connected (${sseClients.size} total)`);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    sseClients.delete(client);
+    console.log(`📡 SSE client disconnected (${sseClients.size} remaining)`);
+  });
+});
+
+// ─── PLAN UPGRADE ENDPOINT ────────────────────────────────────
+app.post('/api/upgrade', checkAuth, async (req, res) => {
+  const { plan_tier } = req.body;
+  if (!['basic','pro','premium'].includes(plan_tier)) {
+    return res.status(400).json({ error: 'Invalid plan. Use: basic, pro, premium' });
+  }
+  const prevTier = CONFIG.planTier;
+  CONFIG.planTier = plan_tier;
+  try {
+    await db.query(`INSERT INTO config_store (key,value,updated_at) VALUES ('plan_tier',$1,NOW())
+      ON CONFLICT(key) DO UPDATE SET value=$1,updated_at=NOW()`, [plan_tier]);
+    broadcastSSE('plan_upgraded', { from: prevTier, to: plan_tier, prices: CONFIG.prices });
+    console.log(`🚀 Plan upgraded: ${prevTier} → ${plan_tier}`);
+    // Re-init Google Sheets sync if upgrading to Pro+
+    if (TIER.isPro() && CONFIG.googleSheetsId) {
+      await syncGoogleSheets();
+      if (!app.locals.sheetsInterval) {
+        app.locals.sheetsInterval = setInterval(syncGoogleSheets, 5 * 60 * 1000);
+      }
+    }
+    res.json({ success: true, plan: plan_tier, prices: CONFIG.prices[plan_tier] });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── PLAN INFO ENDPOINT ───────────────────────────────────────
+app.get('/api/plan', (req, res) => {
+  res.json({
+    current:  CONFIG.planTier,
+    prices:   CONFIG.prices,
+    features: {
+      voiceIn:         TIER.hasVoiceIn(),
+      googleSheets:    TIER.hasGoogleSheets(),
+      persistentDB:    TIER.hasPersistentDB(),
+      dashboard:       TIER.hasDashboard(),
+      returningMemory: TIER.hasReturningMem(),
+      multiLocation:   TIER.hasMultiLocation(),
+      customPersona:   TIER.hasCustomPersona(),
+      proactiveFollow: TIER.hasProactiveFollow(),
+      weeklyReport:    TIER.hasWeeklyReport(),
+      customWebhook:   TIER.hasCustomWebhook(),
+    }
+  });
+});
+
+// ─── STANDARD API ENDPOINTS ───────────────────────────────────
 app.get('/', (req, res) => res.json({
   status: 'online', system: `ZemiRD — ${CONFIG.colmadoName}`,
-  plan: CONFIG.planTier, version: '4.5',
+  plan: CONFIG.planTier, version: '5.1',
   drTime: getDRTimeString(), isOpen: isHoursOpen(),
-  contact: CONFIG.zemirdSupport, uptime: process.uptime(),
 }));
 
 app.get('/api/orders', checkAuth, async (req, res) => {
@@ -991,40 +1040,35 @@ app.get('/api/orders', checkAuth, async (req, res) => {
     res.json({ orders: result.rows, count: result.rowCount });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.get('/api/orders/active', checkAuth, (req, res) => {
   const active = Array.from(orderStates.entries()).map(([phone, state]) => ({ phone, ...state, timer: undefined }));
   res.json({ orders: active, count: active.length });
 });
-
 app.get('/api/orders/pending', checkAuth, (req, res) => {
   const pending = Array.from(pendingOrders.entries()).map(([phone, state]) => ({ phone, ...state }));
   res.json({ orders: pending, count: pending.length });
 });
-
 app.get('/api/orders/completed', checkAuth, async (req, res) => {
   try {
     const result = await db.query(`SELECT * FROM orders WHERE status='completed' AND created_at >= NOW() - INTERVAL '24 hours' ORDER BY created_at DESC`);
     res.json({ orders: result.rows, count: result.rowCount });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/orders/dispatch/:phone', checkAuth, async (req, res) => {
   const phone     = req.params.phone;
   const lastOrder = lastCompletedOrder.get(phone);
-  if (!lastOrder) return res.status(404).json({ error: 'No recent order for this customer' });
+  if (!lastOrder) return res.status(404).json({ error: 'No recent order' });
   await sendWhatsApp(`whatsapp:+${phone}`, formatDispatchNotification(lastOrder));
   orderStates.delete(phone);
+  broadcastSSE('order_dispatched', { orderNumber: lastOrder.orderNumber, phone });
   res.json({ success: true });
 });
-
 app.get('/api/fiao', checkAuth, async (req, res) => {
   try {
     const result = await db.query('SELECT * FROM fiao ORDER BY balance DESC');
     res.json({ accounts: result.rows, count: result.rowCount });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/fiao/update', checkAuth, async (req, res) => {
   const { name, phone, balance, payment } = req.body;
   try {
@@ -1034,47 +1078,34 @@ app.post('/api/fiao/update', checkAuth, async (req, res) => {
       const newBalance = payment
         ? Math.max(0, parseFloat(current.balance) - parseFloat(payment))
         : parseFloat(balance) ?? current.balance;
-      await db.query(`UPDATE fiao SET
-        name=COALESCE($1,name), balance=$2,
+      await db.query(`UPDATE fiao SET name=COALESCE($1,name),balance=$2,
         last_payment=CASE WHEN $3::numeric > 0 THEN $3::numeric ELSE last_payment END,
         last_payment_at=CASE WHEN $3::numeric > 0 THEN NOW() ELSE last_payment_at END
         WHERE phone=$4`, [name, newBalance, payment||0, phone]);
     } else {
-      await db.query(`INSERT INTO fiao (name, phone, balance, last_credit, last_credit_at) VALUES ($1,$2,$3,$3,NOW())`,
+      await db.query(`INSERT INTO fiao (name,phone,balance,last_credit,last_credit_at) VALUES ($1,$2,$3,$3,NOW())`,
         [name, phone, balance||0]);
     }
     await loadFiaoFromDB();
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
-app.post('/api/fiao/credit', checkAuth, async (req, res) => {
-  const { phone, amount } = req.body;
-  try {
-    await db.query(`UPDATE fiao SET balance=balance+$1, last_credit=$1, last_credit_at=NOW() WHERE phone=$2`, [amount, phone]);
-    await loadFiaoFromDB();
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
 app.get('/api/inventory', checkAuth, async (req, res) => {
   try {
     const result = await db.query('SELECT * FROM inventory ORDER BY category, name');
     res.json({ products: result.rows, count: result.rowCount });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/inventory/update', checkAuth, async (req, res) => {
   const { name, price, available, category, emoji, sales_type, quantity_on_hand, image_url } = req.body;
   try {
-    await db.query(`INSERT INTO inventory (name, price, available, category, emoji, sales_type, quantity_on_hand, image_url)
+    await db.query(`INSERT INTO inventory (name,price,available,category,emoji,sales_type,quantity_on_hand,image_url)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [name, price, available !== false, category||'General', emoji||'📦', sales_type||'unit', quantity_on_hand||0, image_url||null]);
     await loadInventoryFromDB();
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.put('/api/inventory/:id', checkAuth, async (req, res) => {
   const { name, price, available, category, emoji, sales_type, quantity_on_hand, image_url } = req.body;
   try {
@@ -1084,7 +1115,6 @@ app.put('/api/inventory/:id', checkAuth, async (req, res) => {
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.delete('/api/inventory/:id', checkAuth, async (req, res) => {
   try {
     await db.query('DELETE FROM inventory WHERE id=$1', [req.params.id]);
@@ -1092,7 +1122,6 @@ app.delete('/api/inventory/:id', checkAuth, async (req, res) => {
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/inventory/toggle', checkAuth, async (req, res) => {
   try {
     await db.query('UPDATE inventory SET available=$1 WHERE id=$2', [req.body.available, req.body.id]);
@@ -1100,78 +1129,55 @@ app.post('/api/inventory/toggle', checkAuth, async (req, res) => {
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
-// Clients
 app.get('/api/clients', checkAuth, async (req, res) => {
   try {
     const result = await db.query('SELECT * FROM clients ORDER BY created_at DESC');
     res.json({ clients: result.rows, count: result.rowCount });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/clients', checkAuth, async (req, res) => {
-  const { business_name, owner_name, phone, whatsapp, email, barrio, address, plan_tier, dashboard_password, twilio_number, railway_url, notes } = req.body;
+  const { business_name,owner_name,phone,whatsapp,email,barrio,address,plan_tier,dashboard_password,twilio_number,railway_url,notes } = req.body;
   try {
     await db.query(`INSERT INTO clients (business_name,owner_name,phone,whatsapp,email,barrio,address,plan_tier,dashboard_password,twilio_number,railway_url,notes)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [business_name, owner_name, phone, whatsapp, email, barrio, address, plan_tier||'starter', dashboard_password, twilio_number, railway_url, notes]);
+      [business_name,owner_name,phone,whatsapp,email,barrio,address,plan_tier||'basic',dashboard_password,twilio_number,railway_url,notes]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.put('/api/clients/:id', checkAuth, async (req, res) => {
-  const { business_name, owner_name, phone, whatsapp, email, barrio, address, plan_tier, status, dashboard_password, twilio_number, railway_url, notes } = req.body;
+  const { business_name,owner_name,phone,whatsapp,email,barrio,address,plan_tier,status,dashboard_password,twilio_number,railway_url,notes } = req.body;
   try {
     await db.query(`UPDATE clients SET business_name=$1,owner_name=$2,phone=$3,whatsapp=$4,email=$5,barrio=$6,address=$7,plan_tier=$8,status=$9,dashboard_password=$10,twilio_number=$11,railway_url=$12,notes=$13,updated_at=NOW() WHERE id=$14`,
-      [business_name, owner_name, phone, whatsapp, email, barrio, address, plan_tier, status||'active', dashboard_password, twilio_number, railway_url, notes, req.params.id]);
+      [business_name,owner_name,phone,whatsapp,email,barrio,address,plan_tier,status||'active',dashboard_password,twilio_number,railway_url,notes,req.params.id]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
+app.post('/api/clients/:id/upgrade', checkAuth, async (req, res) => {
+  const { plan_tier } = req.body;
+  if (!['basic','pro','premium'].includes(plan_tier)) return res.status(400).json({ error: 'Invalid plan' });
+  try {
+    await db.query(`UPDATE clients SET plan_tier=$1,updated_at=NOW() WHERE id=$2`, [plan_tier, req.params.id]);
+    res.json({ success: true, plan: plan_tier, prices: CONFIG.prices[plan_tier] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 app.post('/api/clients/:id/suspend', checkAuth, async (req, res) => {
   try {
     await db.query(`UPDATE clients SET status='suspended',updated_at=NOW() WHERE id=$1`, [req.params.id]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/clients/:id/activate', checkAuth, async (req, res) => {
   try {
     await db.query(`UPDATE clients SET status='active',updated_at=NOW() WHERE id=$1`, [req.params.id]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
-app.post('/api/clients/:id/upgrade', checkAuth, async (req, res) => {
-  try {
-    await db.query(`UPDATE clients SET plan_tier=$1,updated_at=NOW() WHERE id=$2`, [req.body.plan_tier, req.params.id]);
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/promo/update', checkAuth, (req, res) => {
-  CONFIG.promoSemana = req.body.promo || '';
-  res.json({ success: true });
-});
-
-app.get('/api/config', checkAuth, (req, res) => {
-  const { dashboardPass, googleSheetsKey, ...safeConfig } = CONFIG;
-  res.json(safeConfig);
-});
-
-app.post('/api/config/update', checkAuth, (req, res) => {
-  const allowed = ['colmadoName','colmadoBarrio','colmadoAddress','colmadoPhone','colmadoHours','deliveryTime','deliveryZone','minDelivery','promoSemana'];
-  allowed.forEach(k => { if (req.body[k] !== undefined) CONFIG[k] = req.body[k]; });
-  res.json({ success: true });
-});
-
 app.get('/api/customers', checkAuth, async (req, res) => {
   try {
     const result = await db.query('SELECT phone,customer_type,last_address,order_count,updated_at FROM conversations ORDER BY updated_at DESC');
     res.json({ customers: result.rows, count: result.rowCount });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.get('/api/stats', checkAuth, async (req, res) => {
   try {
     const [today, total, convCount] = await Promise.all([
@@ -1186,33 +1192,86 @@ app.get('/api/stats', checkAuth, async (req, res) => {
       activeOrders:  orderStates.size,
       pendingOrders: pendingOrders.size,
       planTier:      CONFIG.planTier,
+      prices:        CONFIG.prices,
       systemUptime:  process.uptime(),
       orderCounter,
       drTime:        getDRTimeString(),
       isOpen:        isHoursOpen(),
+      sseClients:    sseClients.size,
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/promo/update', checkAuth, (req, res) => {
+  CONFIG.promoSemana = req.body.promo || '';
+  res.json({ success: true });
+});
+app.get('/api/config', checkAuth, (req, res) => {
+  const { dashboardPass, googleSheetsKey, ...safeConfig } = CONFIG;
+  res.json(safeConfig);
+});
+app.post('/api/config/update', checkAuth, (req, res) => {
+  const allowed = ['colmadoName','colmadoBarrio','colmadoAddress','colmadoPhone','colmadoHours','deliveryTime','deliveryZone','minDelivery','promoSemana'];
+  allowed.forEach(k => { if (req.body[k] !== undefined) CONFIG[k] = req.body[k]; });
+  res.json({ success: true });
+});
+
+
+// ─── DEMO ENDPOINT (for onboarding portal live demo) ─────────
+app.post('/api/demo', async (req, res) => {
+  const { message, history = [] } = req.body;
+  if (!message) return res.status(400).json({ error: 'message required' });
+
+  try {
+    const demoSystemPrompt = `${buildSystemPrompt('demo', 'new', null)}
+
+CONTEXTO ESPECIAL — MODO DEMO:
+Estás siendo demostrado a un posible cliente del colmado.
+Sé especialmente encantador, rápido y muestra todas tus capacidades.
+Si detectas un pedido real, usa el formato TOTAL: RD$XXX como siempre.`;
+
+    const messages = [
+      ...history.slice(-8),
+      { role: 'user', content: message }
+    ];
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 400,
+      system: demoSystemPrompt,
+      messages,
+    });
+
+    const reply = response.content[0]?.text || '¡Hola! ¿En qué te puedo ayudar? 😊';
+    const orderDetected = detectOrderSummary(reply);
+    const { total } = orderDetected ? extractOrderItems(reply) : { total: 0 };
+
+    res.json({ reply, orderDetected, total });
+  } catch(e) {
+    console.error('❌ Demo API error:', e.message);
+    res.status(500).json({ reply: `¡Ay, un problemita técnico! 😅 Llámanos al ${CONFIG.colmadoPhone}`, orderDetected: false });
+  }
 });
 
 // ─── START ────────────────────────────────────────────────────
 app.listen(CONFIG.port, async () => {
   console.log(`
 ╔══════════════════════════════════════════════════════╗
-║     ZemiRD ColmadoBot Zoe v4.7 — ONLINE 🤖           ║
+║     ZemiRD ColmadoBot Zoe v5.1 — ONLINE 🤖           ║
 ╠══════════════════════════════════════════════════════╣
 ║  Plan    : ${CONFIG.planTier.toUpperCase().padEnd(42)}║
+║  Voice   : ${(TIER.hasVoiceIn() ? '✅ AssemblyAI (Pro+)' : '❌ Basic (text only)').padEnd(42)}║
+║  DB      : ${(TIER.hasPersistentDB() ? '✅ PostgreSQL' : '⚠️  Basic (memory only)').padEnd(42)}║
+║  Sheets  : ${(TIER.hasGoogleSheets() ? '✅ Enabled' : '❌ Pro+ only').padEnd(42)}║
+║  SSE     : ${'✅ /api/stream (live dashboard)'.padEnd(42)}║
 ║  Port    : ${String(CONFIG.port).padEnd(42)}║
-║  Colmado : ${CONFIG.colmadoName.substring(0,42).padEnd(42)}║
-║  DR Time : ${getDRTimeString().padEnd(42)}║
-║  Open    : ${String(isHoursOpen()).padEnd(42)}║
 ║  Support : support@zemirdautomations.com             ║
 ╚══════════════════════════════════════════════════════╝`);
   await initDB();
   await loadInventoryFromDB();
   await loadFiaoFromDB();
-  if (isPro && CONFIG.googleSheetsId) {
+  if (TIER.hasGoogleSheets() && CONFIG.googleSheetsId) {
     await syncGoogleSheets();
-    setInterval(syncGoogleSheets, 5 * 60 * 1000);
+    app.locals.sheetsInterval = setInterval(syncGoogleSheets, 5 * 60 * 1000);
   }
 });
 
