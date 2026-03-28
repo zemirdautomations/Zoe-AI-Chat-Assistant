@@ -420,7 +420,7 @@ async function transcribeVoiceNote(mediaUrl) {
       const body = JSON.stringify({
         audio_url:         mediaUrl,
         language_code:     'es',
-        speech_model:      'nano',
+        speech_models:     { best: 'nano' },
         http_headers: { Authorization: `Basic ${authHeader}` }
       });
       const opts = {
@@ -1275,4 +1275,4 @@ app.listen(CONFIG.port, async () => {
   }
 });
 
-module.exports = app;
+module.expor
