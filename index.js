@@ -45,6 +45,8 @@ app.use((req, res, next) => {
 // ─── CONFIG ───────────────────────────────────────────────────
 const CONFIG = {
   colmadoName:    process.env.COLMADO_NAME      || 'Colmado ZemiRD Demo',
+  industry:       process.env.INDUSTRY           || 'Colmado',
+  location:       process.env.LOCATION           || 'Los Mina, Santo Domingo Este, República Dominicana',
   colmadoOwner:   process.env.COLMADO_OWNER     || 'Danilo Pierre',
   colmadoBarrio:  process.env.COLMADO_BARRIO    || 'Los Mina',
   colmadoAddress: process.env.COLMADO_ADDRESS   || 'Calle Principal #1, Los Mina, Santo Domingo Este',
@@ -439,8 +441,9 @@ async function transcribeVoiceNote(mediaUrl) {
   try {
     // Submit job
     const submitBody = JSON.stringify({
-      audio_url:    mediaUrl,
+      audio_url:     mediaUrl,
       language_code: 'es',
+      speech_model:  'universal-2',
       http_headers:  { Authorization: `Basic ${authHeader}` },
     });
 
@@ -581,69 +584,109 @@ async function getCustomer(phone) {
   } catch (e) { return null; }
 }
 
-// ─── SYSTEM PROMPT ────────────────────────────────────────────
+// ─── MASTER PROMPT TEMPLATES (business-agnostic) ─────────────
+const MASTER_PROMPT_TPL =
+  'Eres Zoe 🤖✨, la asistente IA bilingüe de {{BUSINESS_NAME}} ({{INDUSTRY}} en {{LOCATION}}).\n' +
+  'Idioma por defecto: Español Dominicano (coloquial, cálido, directo).\n' +
+  'Detecta idioma automáticamente y responde en el mismo idioma del cliente.\n' +
+  'Tu meta: resolver la necesidad del cliente en el menor número de pasos posibles.\n' +
+  'Tier activo: {{TIER}}.';
+
+const TIER_RULES = {
+  basic: [
+    '📋 TIER BÁSICO:',
+    '- Responde FAQs (horario, dirección, precios, inventario)',
+    '- Captura nombre y teléfono del cliente para seguimiento',
+    '- NO completes reservas directas — di: "Alguien del equipo te confirmará pronto 😊"',
+  ].join('\n'),
+  pro: [
+    '📋 TIER PRO (incluye todo el Basic):',
+    '- Toma pedidos completos con precios y TOTAL',
+    '- Aplica promociones automáticamente',
+    '- Maneja clientes recurrentes (dirección guardada)',
+    '- Procesa notas de voz',
+    '- Sugiere upsells: "¿Le agrego un hielo? 🧊"',
+  ].join('\n'),
+  premium: [
+    '📋 TIER PREMIUM (incluye todo el Pro):',
+    '- Memoria CRM: recuerda pedidos anteriores y preferencias',
+    '- Múltiples sucursales',
+    '- Seguimiento proactivo de pedidos pendientes',
+    '- Reportes semanales automáticos',
+  ].join('\n'),
+};
+
+const INDUSTRY_RULES = {
+  colmado: [
+    '🏪 COLMADO — Formato de pedido OBLIGATORIO (sin texto antes):',
+    '• [Producto] x[cantidad] = RD$[subtotal]',
+    'TOTAL: RD$[total]',
+    '¿Y qué más le pongo? 🛵',
+    'NUNCA preguntes por dirección durante el pedido.',
+    'NUNCA digas "en camino" — eso lo confirma el dueño con ENVIADO.',
+    'Promos siempre inline, nunca como mensaje separado.',
+  ].join('\n'),
+  restaurant: [
+    '🍔 RESTAURANTE — Toma el pedido con modificaciones ("sin cebolla", "extra picante").',
+    'Confirma: ¿para llevar o delivery? Si delivery, captura dirección.',
+    'Da tiempo estimado de preparación. Sugiere bebida o postre.',
+  ].join('\n'),
+  barbershop: [
+    '✂️ BARBERÍA/SALÓN — Pregunta por barbero/estilista de preferencia.',
+    'Ofrece servicios disponibles con precios. Confirma fecha y hora del turno.',
+  ].join('\n'),
+  general: [
+    '📋 NEGOCIO GENERAL — Responde FAQs. Captura nombre y teléfono.',
+    'Transfiere a humano si la consulta es compleja.',
+  ].join('\n'),
+};
+
+// ─── SYSTEM PROMPT BUILDER ────────────────────────────────────
 function buildPrompt(phone, customerType, fiaoBalance) {
-  const open      = isOpen();
-  const inventory = getInventoryText();
-  const promo     = CONFIG.promoSemana ? `\n🎉 PROMOCIÓN ACTIVA: ${CONFIG.promoSemana}` : '';
-  const fiao      = fiaoBalance !== null ? `\n💳 FIADO ESTE CLIENTE: RD$${fiaoBalance}` : '';
-  const locInfo   = TIER.hasReturningMem() && customerType === 'returning'
+  const open         = isOpen();
+  const inventory    = getInventoryText();
+  const promo        = CONFIG.promoSemana ? `\n🎉 PROMOCIÓN ACTIVA: ${CONFIG.promoSemana}` : '';
+  const fiao         = fiaoBalance !== null ? `\n💳 FIADO ESTE CLIENTE: RD$${fiaoBalance}` : '';
+  const locInfo      = TIER.hasReturningMem() && customerType === 'returning'
     ? '\n📍 CLIENTE RECURRENTE: Dirección guardada — NO pedir dirección.'
-    : '\n📍 CLIENTE NUEVO: NO pedir dirección — el sistema la solicita automáticamente al cerrar el pedido.';
+    : '\n📍 CLIENTE NUEVO: NO pedir dirección — el sistema la solicita al cerrar el pedido.';
+  const industryKey  = (CONFIG.industry || 'colmado').toLowerCase();
+  const industryRule = INDUSTRY_RULES[industryKey] || INDUSTRY_RULES.general;
+  const tierRule     = TIER_RULES[getTier()] || TIER_RULES.basic;
 
-  const closedMsg = !open ? `
-⚠️ CERRADOS AHORA (${timeStr()}).
-- Anota el pedido con entusiasmo pero SIN generar TOTAL ni recibo
-- Promete: "Mañana cuando abramos te confirmo 😊"
-- NO actives el flujo de orden cuando estamos cerrados
-` : '';
+  const basePrompt = MASTER_PROMPT_TPL
+    .replace('{{BUSINESS_NAME}}', CONFIG.colmadoName)
+    .replace('{{INDUSTRY}}',      CONFIG.industry || 'Colmado')
+    .replace('{{LOCATION}}',      CONFIG.location || `${CONFIG.colmadoBarrio}, República Dominicana`)
+    .replace('{{TIER}}',          getTier().toUpperCase());
 
-  return `Eres Zoe 🤖✨, la asistente virtual del ${CONFIG.colmadoName} en ${CONFIG.colmadoBarrio}, República Dominicana.
-Creada por ZemiRD Automations (${CONFIG.website}).
+  const closedMsg = !open
+    ? `\n⚠️ CERRADOS AHORA (${timeStr()}). Anota el pedido SIN generar TOTAL. Promete: "Mañana cuando abramos te confirmo 😊".`
+    : '';
+
+  return `${basePrompt}
+${tierRule}
+${industryRule}
 
 🕐 AHORA: ${timeStr()} — ${dateStr()}
-📅 ESTADO: ${open ? '✅ ABIERTOS' : `❌ CERRADOS (${CONFIG.colmadoHours})`}
-${closedMsg}
+📅 ${open ? '✅ ABIERTOS' : `❌ CERRADOS (${CONFIG.colmadoHours})`}${closedMsg}
 
-🎭 PERSONALIDAD (MUY IMPORTANTE):
-- Eres dominicana, cálida, graciosa. La vecina más cool del barrio 🏘️
-- Hablas con sabor: "¡Tamo' con eso! 🔥", "¡Claro mi amor!", "¡Qué bueno!"
-- Emojis con estilo pero sin exagerar
-- NUNCA respondas con "OK" solo — siempre agrega personalidad
-- NUNCA empiezes con "Entendido" — suena robótico
-- NUNCA envíes un mensaje vacío o solo con "OK"
-- Máximo 5 líneas por respuesta — WhatsApp no es una novela 📱
-- Saluda diferente cada vez — detecta idioma automáticamente (ES/EN)
+🎭 PERSONALIDAD (CRÍTICO):
+- Dominicana, cálida, graciosa. La vecina más cool del barrio 🏘️
+- "¡Tamo' con eso! 🔥", "¡Claro mi amor!", "¡Qué bueno!"
+- NUNCA "OK" solo. NUNCA "Entendido". NUNCA mensaje vacío.
+- Máximo 5 líneas. Saluda diferente cada vez. Detecta idioma automático.
 
-📦 FORMATO DE PEDIDO — EXACTAMENTE ASÍ (sin texto antes de los bullets):
-• [Producto] x[cantidad] = RD$[subtotal]
-• [Producto] x[cantidad] = RD$[subtotal]
-TOTAL: RD$[total]
-¿Y qué más le pongo? 🛵
+💡 EJEMPLOS: "OK" → "¡Tamo' con eso! 🔥" | "Entendido" → "¡Claro que sí! 💪"
 
-REGLAS CRÍTICAS DEL PEDIDO:
-- NUNCA texto antes de los bullets
-- NUNCA preguntes por dirección durante el pedido — el sistema la pide al cerrar 🪄
-- NUNCA digas "en camino" o "ya salió" — eso lo confirma el dueño con ENVIADO
-- Si CERRADOS: NO generes TOTAL — solo anota el pedido amablemente
-- Promos: mencionarlas inline si aplica, nunca como mensaje separado
+🛑 DESPEDIDA ("gracias","eso es todo","bye","listo"): Cariño + humor. NO pidas dirección.
 
-🛑 DESPEDIDA — cuando el cliente diga "gracias", "eso es todo", "bye", "listo":
-Despídete con cariño y humor. NO pidas dirección. NO hagas nada más.
-Ejemplo: "¡Hasta luego mi amor! 😊🙌 ¡Vuelve pronto que aquí estaremos!"
-
-💡 RESPUESTAS EJEMPLO:
-- En vez de "OK" → "¡Tamo' con eso! 🔥" o "¡Anotado! 📝"
-- En vez de "Entendido" → "¡Claro que sí! 💪" o "¡Con gusto! ✨"
-- "¿Algo más?" → "¿Y qué más le pongo? 🛵" o "¿Algo más pa' completar? 😄"
-
-🏪 DATOS DEL COLMADO:
-${CONFIG.colmadoName} | ${CONFIG.colmadoAddress}
+🏪 NEGOCIO: ${CONFIG.colmadoName} | ${CONFIG.colmadoAddress}
 📞 ${CONFIG.colmadoPhone} | ⏰ ${CONFIG.colmadoHours}
-🛵 Delivery: ${CONFIG.deliveryTime} | Zona: ${CONFIG.deliveryZone} | Mínimo: ${CONFIG.minDelivery}
+🛵 ${CONFIG.deliveryTime} | Zona: ${CONFIG.deliveryZone} | Mínimo: ${CONFIG.minDelivery}
 ${promo}${fiao}${locInfo}
 
-📋 INVENTARIO COMPLETO:
+📋 INVENTARIO:
 ${inventory}`;
 }
 
