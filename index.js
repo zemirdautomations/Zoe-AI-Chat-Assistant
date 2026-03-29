@@ -10,7 +10,7 @@
  *
  * Features:
  * - Tier system: Basic / Pro / Premium (single source of truth)
- * - Voice notes: AssemblyAI transcription (Pro+)
+ * - Voice notes: Deepgram nova-2 transcription (Pro+)
  * - Address collected AFTER order closes (never mid-browse)
  * - Zero "OK" ghost messages (res.status(200).end())
  * - Promo mentioned inline, never as separate message
@@ -429,105 +429,71 @@ async function getNextOrderNumber() {
   return `ZRD-${orderCounter}`;
 }
 
-// ─── VOICE: AssemblyAI transcription ─────────────────────────
-// Docs: https://www.assemblyai.com/docs/api-reference/transcripts/submit
-// Endpoint: POST /v2/transcript
-// Auth: Authorization: <api_key>  (raw key, no "Bearer")
+// ─── VOICE: Deepgram transcription ───────────────────────────
+// Docs: https://developers.deepgram.com/reference/listen-remote
+// Endpoint: POST https://api.deepgram.com/v1/listen
+// No polling needed — response is immediate
 async function transcribeVoiceNote(mediaUrl) {
-  const KEY = process.env.ASSEMBLYAI_API_KEY;
-  if (!KEY) { console.error('🎤 ASSEMBLYAI_API_KEY not set'); return null; }
+  const KEY = process.env.DEEPGRAM_API_KEY;
+  if (!KEY) { console.error('🎤 DEEPGRAM_API_KEY not set'); return null; }
 
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken  = process.env.TWILIO_AUTH_TOKEN;
   const twilioAuth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
 
   try {
-    // Step 1: Submit transcription job
-    const body = JSON.stringify({
-      audio_url:     mediaUrl,
-      language_code: 'es',
-      http_headers:  { Authorization: `Basic ${twilioAuth}` },
-    });
+    console.log('🎤 Sending to Deepgram...');
 
-    console.log('🎤 Submitting to AssemblyAI...');
+    // Deepgram accepts a URL body and returns transcript immediately
+    const body = JSON.stringify({ url: mediaUrl });
 
-    const submitRes = await new Promise((resolve, reject) => {
+    const result = await new Promise((resolve, reject) => {
       const opts = {
-        hostname: 'api.assemblyai.com',
-        path:     '/v2/transcript',
+        hostname: 'api.deepgram.com',
+        path:     '/v1/listen?model=nova-2&language=es&smart_format=true',
         method:   'POST',
         headers: {
-          'Authorization':  KEY,          // raw key — no "Bearer"
+          'Authorization':  `Token ${KEY}`,
           'Content-Type':   'application/json',
           'Content-Length': Buffer.byteLength(body),
         },
       };
+
       let raw = '';
-      const req = https.request(opts, r => {
-        r.on('data', c => raw += c);
-        r.on('end', () => {
+      const req = https.request(opts, res => {
+        res.on('data', chunk => raw += chunk);
+        res.on('end', () => {
           try {
-            resolve(JSON.parse(raw));
+            const parsed = JSON.parse(raw);
+            resolve(parsed);
           } catch(e) {
-            console.error('🎤 Raw response:', raw.substring(0, 200));
-            reject(new Error('AssemblyAI non-JSON response: ' + raw.substring(0, 100)));
+            console.error('🎤 Deepgram raw response:', raw.substring(0, 300));
+            reject(new Error('Deepgram non-JSON response'));
           }
         });
       });
+
       req.on('error', reject);
+      req.setTimeout(15000, () => {
+        req.destroy(new Error('Deepgram request timed out'));
+      });
       req.write(body);
       req.end();
     });
 
-    if (submitRes.error) {
-      console.error('🎤 Submit error:', submitRes.error);
+    // Extract transcript from Deepgram response
+    const transcript = result?.results?.channels?.[0]?.alternatives?.[0]?.transcript?.trim();
+
+    if (!transcript || transcript.length < 2) {
+      console.error('🎤 Deepgram empty transcript. Full response:', JSON.stringify(result).substring(0, 300));
       return null;
     }
-    if (!submitRes.id) {
-      console.error('🎤 No ID returned:', JSON.stringify(submitRes));
-      return null;
-    }
-    console.log(`🎤 Job ID: ${submitRes.id}`);
 
-    // Step 2: Poll for result (max 30 seconds)
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 1000));
-
-      const poll = await new Promise((resolve, reject) => {
-        const opts = {
-          hostname: 'api.assemblyai.com',
-          path:     `/v2/transcript/${submitRes.id}`,
-          method:   'GET',
-          headers:  { Authorization: KEY },
-        };
-        let raw = '';
-        https.get(opts, r => {
-          r.on('data', c => raw += c);
-          r.on('end', () => {
-            try { resolve(JSON.parse(raw)); }
-            catch(e) { reject(new Error('Poll parse failed: ' + raw.substring(0,100))); }
-          });
-        }).on('error', reject);
-      });
-
-      console.log(`🎤 Status: ${poll.status} (${i+1}s)`);
-
-      if (poll.status === 'completed') {
-        const text = poll.text?.trim();
-        console.log(`🎤 Transcribed: "${text}"`);
-        return text?.length > 1 ? text : null;
-      }
-      if (poll.status === 'error') {
-        console.error('🎤 AssemblyAI error:', poll.error);
-        return null;
-      }
-    }
-
-    console.error('🎤 Timeout after 30s');
-    return null;
+    console.log(`🎤 Deepgram transcribed: "${transcript}"`);
+    return transcript;
 
   } catch(e) {
-    console.error('🎤 Exception:', e.message);
+    console.error('🎤 Deepgram exception:', e.message);
     return null;
   }
 }
@@ -1059,7 +1025,7 @@ app.get('/', (req, res) => res.json({
   system: `ZemiRD — ${CONFIG.colmadoName}`,
   version: '6.0',
   plan: CONFIG.planTier,
-  voice: TIER.hasVoiceIn() ? 'AssemblyAI' : 'disabled',
+  voice: TIER.hasVoiceIn() ? 'Deepgram' : 'disabled',
   open: isOpen(),
   drTime: timeStr(),
 }));
@@ -1233,7 +1199,7 @@ app.listen(CONFIG.port, async () => {
 ╠══════════════════════════════════════════════════════╣
 ║  Colmado : ${CONFIG.colmadoName.substring(0,42).padEnd(42)}║
 ║  Plan    : ${CONFIG.planTier.toUpperCase().padEnd(42)}║
-║  Voice   : ${(TIER.hasVoiceIn() ? '✅ AssemblyAI (Pro+)' : '❌ Text only (Basic)').padEnd(42)}║
+║  Voice   : ${(TIER.hasVoiceIn() ? '✅ Deepgram nova-2 (Pro+)' : '❌ Text only (Basic)').padEnd(42)}║
 ║  DB      : ${(TIER.hasPersistentDB() ? '✅ PostgreSQL' : '⚠️  Memory only (Basic)').padEnd(42)}║
 ║  Sheets  : ${(TIER.hasGoogleSheets() ? '✅ Enabled' : '❌ Pro+ only').padEnd(42)}║
 ║  SSE     : ${'✅ /api/stream (live dashboard)'.padEnd(42)}║
