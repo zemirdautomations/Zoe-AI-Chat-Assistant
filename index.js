@@ -429,7 +429,7 @@ async function getNextOrderNumber() {
   return `ZRD-${orderCounter}`;
 }
 
-// ─── VOICE: AssemblyAI transcription ──────────────────────────
+// ─── VOICE: AssemblyAI transcription (v3 API) ───────────────
 async function transcribeVoiceNote(mediaUrl) {
   const KEY = process.env.ASSEMBLYAI_API_KEY;
   if (!KEY) { console.error('🎤 ASSEMBLYAI_API_KEY not set'); return null; }
@@ -439,48 +439,76 @@ async function transcribeVoiceNote(mediaUrl) {
   const authHeader = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
 
   try {
-    // Submit job
+    // Step 1: Submit — AssemblyAI v3 API
     const submitBody = JSON.stringify({
-      audio_url:     mediaUrl,
+      audio_url:    mediaUrl,
       language_code: 'es',
-      speech_model:  'universal-2',
-      http_headers:  { Authorization: `Basic ${authHeader}` },
+      http_headers: { Authorization: `Basic ${authHeader}` },
     });
+
+    console.log('🎤 Submitting to AssemblyAI v3...');
 
     const submitRes = await new Promise((resolve, reject) => {
       const opts = {
-        hostname: 'api.assemblyai.com', path: '/v2/transcript', method: 'POST',
-        headers: { Authorization: KEY, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(submitBody) },
+        hostname: 'api.assemblyai.com',
+        path:     '/v3/transcript',
+        method:   'POST',
+        headers: {
+          'Authorization':  KEY,
+          'Content-Type':   'application/json',
+          'Content-Length': Buffer.byteLength(submitBody),
+        },
       };
       let data = '';
-      const req = https.request(opts, r => { r.on('data', c => data += c); r.on('end', () => { try { resolve(JSON.parse(data)); } catch (e) { reject(e); } }); });
+      const req = https.request(opts, r => {
+        r.on('data', c => data += c);
+        r.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { reject(e); } });
+      });
       req.on('error', reject);
       req.write(submitBody);
       req.end();
     });
 
-    if (!submitRes.id) { console.error('🎤 Submit failed:', JSON.stringify(submitRes)); return null; }
-    console.log(`🎤 AssemblyAI job: ${submitRes.id}`);
+    if (!submitRes.id) {
+      console.error('🎤 Submit failed:', JSON.stringify(submitRes));
+      return null;
+    }
+    console.log(`🎤 Job ID: ${submitRes.id}`);
 
-    // Poll (max 20 seconds)
+    // Step 2: Poll for result (max 20s)
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 1000));
       const poll = await new Promise((resolve, reject) => {
-        const opts = { hostname: 'api.assemblyai.com', path: `/v2/transcript/${submitRes.id}`, method: 'GET', headers: { Authorization: KEY } };
+        const opts = {
+          hostname: 'api.assemblyai.com',
+          path:     `/v3/transcript/${submitRes.id}`,
+          method:   'GET',
+          headers:  { Authorization: KEY },
+        };
         let data = '';
-        https.get(opts, r => { r.on('data', c => data += c); r.on('end', () => { try { resolve(JSON.parse(data)); } catch (e) { reject(e); } }); }).on('error', reject);
+        https.get(opts, r => {
+          r.on('data', c => data += c);
+          r.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { reject(e); } });
+        }).on('error', reject);
       });
+
+      console.log(`🎤 Status: ${poll.status} (${i+1}s)`);
+
       if (poll.status === 'completed') {
         const text = poll.text?.trim();
-        console.log(`🎤 Transcribed: ${text}`);
+        console.log(`🎤 Transcribed: "${text}"`);
         return text?.length > 1 ? text : null;
       }
-      if (poll.status === 'error') { console.error('🎤 AssemblyAI error:', poll.error); return null; }
+      if (poll.status === 'error') {
+        console.error('🎤 Error:', poll.error);
+        return null;
+      }
     }
-    console.error('🎤 AssemblyAI timeout');
+    console.error('🎤 Timeout after 20s');
     return null;
-  } catch (e) {
-    console.error('🎤 AssemblyAI exception:', e.message);
+
+  } catch(e) {
+    console.error('🎤 Exception:', e.message);
     return null;
   }
 }
