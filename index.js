@@ -429,66 +429,84 @@ async function getNextOrderNumber() {
   return `ZRD-${orderCounter}`;
 }
 
-// ─── VOICE: AssemblyAI transcription (v3 API) ───────────────
+// ─── VOICE: AssemblyAI transcription ─────────────────────────
+// Docs: https://www.assemblyai.com/docs/api-reference/transcripts/submit
+// Endpoint: POST /v2/transcript
+// Auth: Authorization: <api_key>  (raw key, no "Bearer")
 async function transcribeVoiceNote(mediaUrl) {
   const KEY = process.env.ASSEMBLYAI_API_KEY;
   if (!KEY) { console.error('🎤 ASSEMBLYAI_API_KEY not set'); return null; }
 
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken  = process.env.TWILIO_AUTH_TOKEN;
-  const authHeader = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+  const twilioAuth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
 
   try {
-    // Step 1: Submit — AssemblyAI v3 API
-    const submitBody = JSON.stringify({
-      audio_url:    mediaUrl,
+    // Step 1: Submit transcription job
+    const body = JSON.stringify({
+      audio_url:     mediaUrl,
       language_code: 'es',
-      http_headers: { Authorization: `Basic ${authHeader}` },
+      http_headers:  { Authorization: `Basic ${twilioAuth}` },
     });
 
-    console.log('🎤 Submitting to AssemblyAI v3...');
+    console.log('🎤 Submitting to AssemblyAI...');
 
     const submitRes = await new Promise((resolve, reject) => {
       const opts = {
         hostname: 'api.assemblyai.com',
-        path:     '/v3/transcript',
+        path:     '/v2/transcript',
         method:   'POST',
         headers: {
-          'Authorization':  KEY,
+          'Authorization':  KEY,          // raw key — no "Bearer"
           'Content-Type':   'application/json',
-          'Content-Length': Buffer.byteLength(submitBody),
+          'Content-Length': Buffer.byteLength(body),
         },
       };
-      let data = '';
+      let raw = '';
       const req = https.request(opts, r => {
-        r.on('data', c => data += c);
-        r.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { reject(e); } });
+        r.on('data', c => raw += c);
+        r.on('end', () => {
+          try {
+            resolve(JSON.parse(raw));
+          } catch(e) {
+            console.error('🎤 Raw response:', raw.substring(0, 200));
+            reject(new Error('AssemblyAI non-JSON response: ' + raw.substring(0, 100)));
+          }
+        });
       });
       req.on('error', reject);
-      req.write(submitBody);
+      req.write(body);
       req.end();
     });
 
+    if (submitRes.error) {
+      console.error('🎤 Submit error:', submitRes.error);
+      return null;
+    }
     if (!submitRes.id) {
-      console.error('🎤 Submit failed:', JSON.stringify(submitRes));
+      console.error('🎤 No ID returned:', JSON.stringify(submitRes));
       return null;
     }
     console.log(`🎤 Job ID: ${submitRes.id}`);
 
-    // Step 2: Poll for result (max 20s)
-    for (let i = 0; i < 20; i++) {
+    // Step 2: Poll for result (max 30 seconds)
+    for (let i = 0; i < 30; i++) {
       await new Promise(r => setTimeout(r, 1000));
+
       const poll = await new Promise((resolve, reject) => {
         const opts = {
           hostname: 'api.assemblyai.com',
-          path:     `/v3/transcript/${submitRes.id}`,
+          path:     `/v2/transcript/${submitRes.id}`,
           method:   'GET',
           headers:  { Authorization: KEY },
         };
-        let data = '';
+        let raw = '';
         https.get(opts, r => {
-          r.on('data', c => data += c);
-          r.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { reject(e); } });
+          r.on('data', c => raw += c);
+          r.on('end', () => {
+            try { resolve(JSON.parse(raw)); }
+            catch(e) { reject(new Error('Poll parse failed: ' + raw.substring(0,100))); }
+          });
         }).on('error', reject);
       });
 
@@ -500,11 +518,12 @@ async function transcribeVoiceNote(mediaUrl) {
         return text?.length > 1 ? text : null;
       }
       if (poll.status === 'error') {
-        console.error('🎤 Error:', poll.error);
+        console.error('🎤 AssemblyAI error:', poll.error);
         return null;
       }
     }
-    console.error('🎤 Timeout after 20s');
+
+    console.error('🎤 Timeout after 30s');
     return null;
 
   } catch(e) {
